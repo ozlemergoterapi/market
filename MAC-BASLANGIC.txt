@@ -31,7 +31,8 @@ Temel cari, ödeme ve fiyat karşılaştırma işlemleri internetsiz çalışır
 Fotoğraftan yazı okuma için ayrıca Tesseract gerekir; bu pakette motor yoktur.
 Motor kurulu değilse fatura fotoğrafı saklanabilir ve bilgiler elle girilir.
 Fotoğrafı oku ve alanları doldur düğmesi okunabilen bilgileri taslak olarak
-aktarır. Tüm sayfaları birlikte seçin, vade girin, alanları ve ürünleri
+aktarır. Fotoğraf ekle düğmesiyle sayfaları tek tek de ekleyebilirsiniz;
+önceki sayfalar korunur. Tüm sayfaları ekledikten sonra okutun, vade girin, alanları ve ürünleri
 kontrol ederek onaylayın. Farklı tablo düzenleri eksik okunabilir.
 
 BU PAKETİN TEST DURUMU

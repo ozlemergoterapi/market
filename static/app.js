@@ -58,7 +58,7 @@ $('#new-invoice').onclick=()=>{
   if(!state)return;
   if(!state.firms.length){toast('Önce faturanın ait olduğu firmayı ekleyin.');$('[data-tab="firms"]').click();$('#new-firm').click();return;}
   ocrGeneration++;setMode('invoice',null);$('#invoice-form').reset();$('#invoice-form .form-error').textContent='';selectedPhoto=null;selectedPhotos=[];
-  $('#photo-preview').hidden=true;$('#ocr-text').hidden=true;$('#ocr-review').hidden=true;$('#ocr-status').textContent='Fotoğraf isteğe bağlıdır. Okunan yazılar otomatik kaydedilmez.';
+  renderSelectedPhotos();$('#ocr-text').hidden=true;$('#ocr-review').hidden=true;$('#ocr-status').textContent='Fotoğraf isteğe bağlıdır. Okunan yazılar otomatik kaydedilmez.';
   $('#item-rows').innerHTML='';$('#due-preview').value='';
   $('#firm-select').innerHTML=state.firms.map(f=>`<option value="${f.id}">${esc(f.name)}</option>`).join('');
   $('#invoice-form [name=issued]').value=state.today;$('#invoice-dialog').showModal();
@@ -71,24 +71,56 @@ $('#add-item').onclick=()=>{
   row.innerHTML='<input class="product" aria-label="Ürün adı" placeholder="Marka ve ürün adı" required maxlength="200" list="products"><input class="unit" aria-label="Ambalaj ve fiyat birimi" placeholder="1 litre / adet" required maxlength="200"><input class="price" aria-label="Son birim fiyat TL" type="number" step="0.0001" min="0.0001" placeholder="Son fiyat TL" required><button type="button" aria-label="Ürün satırını sil">Sil</button>';
   row.querySelector('button').onclick=()=>row.remove();$('#item-rows').append(row);
 };
-$('#photo').onchange=async e=>{
+function photoBytes(value){
+  const base64=value.split(',')[1]||'';
+  return Math.floor(base64.length*3/4)-(base64.endsWith('==')?2:base64.endsWith('=')?1:0);
+}
+function renderSelectedPhotos(){
+  selectedPhoto=selectedPhotos[0]||null;
+  $('#photo-previews').innerHTML=selectedPhotos.map((photo,index)=>`<article class="photo-page"><img src="${esc(photo)}" alt="Fatura sayfa ${index+1}"><div><strong>Sayfa ${index+1}</strong><button type="button" data-remove-photo="${index}" aria-label="Sayfa ${index+1} fotoğrafını kaldır" class="delete-button">Kaldır</button></div></article>`).join('');
+  $('#photo-count').textContent=selectedPhotos.length?selectedPhotos.length+' fotoğraf eklendi · En fazla 6 sayfa, toplam 8 MB.':'';
+}
+function photoSelectionChanged(){
   ocrGeneration++;
-  selectedPhoto=null;selectedPhotos=[];$('#photo-preview').hidden=true;$('#ocr-text').hidden=true;
-  const files=[...e.target.files];if(!files.length)return;
-  if(files.length>6||files.reduce((sum,f)=>sum+f.size,0)>8*1024*1024||files.some(f=>!['image/jpeg','image/png','image/webp'].includes(f.type))){e.target.value='';$('#ocr-status').textContent='En fazla 6 JPEG, PNG veya WebP seçin; toplam boyut 8 MB altında olmalı.';return;}
-  photoLoading=true;
-  try{
-    selectedPhotos=await Promise.all(files.map(file=>new Promise((resolve,reject)=>{const r=new FileReader();r.onload=()=>resolve(r.result);r.onerror=reject;r.readAsDataURL(file);})));selectedPhoto=selectedPhotos[0];$('#photo-preview').src=selectedPhoto;$('#photo-preview').hidden=false;$('#ocr-status').textContent=files.length+' fotoğraf seçildi. Tüm sayfaları birlikte okutabilirsiniz.';
-  }catch{$('#ocr-status').textContent='Fotoğraf yüklenemedi.';}finally{photoLoading=false;}
-
+  $('.confirm input').checked=false;
+  $('#ocr-text').hidden=true;$('#ocr-review').hidden=true;
+  renderSelectedPhotos();
+  $('#ocr-status').textContent=selectedPhotos.length+' fotoğraf eklendi. Tüm sayfaları okumak için “Fotoğrafı oku ve alanları doldur” düğmesine basın. Önceden doldurulmuş alanları yeniden kontrol edin.';
+}
+$('#add-photo').onclick=()=>$('#photo').click();
+$('#photo-previews').onclick=e=>{
+  const button=e.target.closest('[data-remove-photo]');
+  if(!button||photoLoading||$('#read-photo').disabled)return;
+  selectedPhotos.splice(Number(button.dataset.removePhoto),1);
+  photoSelectionChanged();
 };
+$('#photo').onchange=async e=>{
+  const files=[...e.target.files];e.target.value='';
+  if(!files.length)return;
+  if(photoLoading||$('#read-photo').disabled){$('#ocr-status').textContent='Devam eden fotoğraf işleminin bitmesini bekleyin.';return;}
+  const existingBytes=selectedPhotos.reduce((sum,p)=>sum+photoBytes(p),0);
+  if(selectedPhotos.length+files.length>6||existingBytes+files.reduce((sum,f)=>sum+f.size,0)>8*1024*1024||files.some(f=>!['image/jpeg','image/png','image/webp'].includes(f.type))){$('#ocr-status').textContent='Eklenemedi. Toplam en fazla 6 JPEG/PNG/WebP ve 8 MB olabilir. Mevcut fotoğraflarınız korundu.';return;}
+  const generation=ocrGeneration;
+  photoLoading=true;$('#add-photo').disabled=true;$('#read-photo').disabled=true;
+  try{
+    const added=await Promise.all(files.map(file=>new Promise((resolve,reject)=>{const reader=new FileReader();reader.onload=()=>resolve(reader.result);reader.onerror=reject;reader.readAsDataURL(file);})));
+    if(generation!==ocrGeneration||!$('#invoice-dialog').open)return;
+    let duplicate=false;
+    for(const photo of added){if(selectedPhotos.includes(photo)){duplicate=true;}else{selectedPhotos.push(photo);}}
+    photoSelectionChanged();
+    if(duplicate)$('#ocr-status').textContent+=' Aynı fotoğraf tekrar eklenmedi.';
+  }catch{$('#ocr-status').textContent='Fotoğraf yüklenemedi. Mevcut fotoğraflarınız korundu.';}
+  finally{photoLoading=false;$('#add-photo').disabled=false;$('#read-photo').disabled=false;}
+};
+
 let ocrGeneration=0;
 $('#read-photo').onclick=async()=>{
+  if(photoLoading)return;
   if(!selectedPhoto){$('#ocr-status').textContent='Önce bir fotoğraf seçin.';return;}
   const form=$('#invoice-form');
   if((form.elements.number.value||form.elements.total.value||$('#item-rows').children.length)&&!window.confirm('Fotoğraftan okunan bilgiler bu formdaki tarih, numara, toplam, firma ve ürünlerin yerine yazılacak. Kaydettiğiniz kayıt değişmez; önce kontrol edeceksiniz. Devam edilsin mi?'))return;
   const generation=++ocrGeneration, requestedPhoto=selectedPhoto;
-  $('#read-photo').disabled=true;$('#ocr-status').textContent='Fotoğraf okunuyor ve fatura alanları hazırlanıyor…';
+  $('#read-photo').disabled=true;$('#add-photo').disabled=true;$('#ocr-status').textContent='Fotoğraf okunuyor ve fatura alanları hazırlanıyor…';
   form.querySelector('button.primary').disabled=true;
   try{
     const result=await api('ocr',{photos:selectedPhotos.length?selectedPhotos:[requestedPhoto]});
@@ -114,7 +146,7 @@ $('#read-photo').onclick=async()=>{
     $('#ocr-review').textContent=(draft.supplier?'Okunan firma: '+draft.supplier+'\n':'')+draft.warnings.join('\n');
     $('#ocr-status').textContent=`${draft.items.length} ürün satırı ve okunabilen fatura alanları dolduruldu. Henüz kaydedilmedi. Tüm sayfaların eksiksiz okunduğunu kontrol edin; boş alanları tamamlayın. Birim fiyatlar satır tutarı + KDV üzerinden hesaplandı.`;
   }catch(e){$('#ocr-status').textContent=e.message;}
-  finally{$('#read-photo').disabled=false;form.querySelector('button.primary').disabled=false;}
+  finally{$('#read-photo').disabled=false;$('#add-photo').disabled=false;form.querySelector('button.primary').disabled=false;}
 };
 
 document.addEventListener('click',async e=>{
@@ -159,7 +191,7 @@ document.addEventListener('click',async e=>{
     state.items.filter(t=>t.invoice_id===i.id).forEach(t=>{$('#add-item').click();const row=$('#item-rows').lastElementChild;row.querySelector('.product').value=t.product;row.querySelector('.unit').value=t.unit;row.querySelector('.price').value=t.unit_price||(t.price/100).toFixed(4);});
     if(i.has_photo){
       photoLoading=true;form.querySelector('button.primary').disabled=true;
-      try{const r=await api('photo/'+i.id);selectedPhoto=r.photo;selectedPhotos=r.photos||[r.photo];$('#photo-preview').src=r.photo;$('#photo-preview').hidden=false;}
+      try{const r=await api('photo/'+i.id);selectedPhotos=r.photos||[r.photo];renderSelectedPhotos();}
       catch(error){form.closest('dialog').close();toast('Fotoğraf yüklenemedi. Kaydı yeniden açın.');}
       finally{photoLoading=false;form.querySelector('button.primary').disabled=false;}
     }

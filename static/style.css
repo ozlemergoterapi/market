@@ -6,3 +6,4 @@
 .delete-button{color:#ac2626;border-color:#ecd3d3}.delete-button:hover{background:#fff0f0}
 .ocr-review{white-space:pre-line;padding:14px;border-radius:8px;background:#fff5df;color:#806026;font-size:12px;line-height:1.8}
 .item-evidence{grid-column:1/-1;font-size:10px;color:#778273;line-height:1.6}
+.photo-previews{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;margin:12px 0}.photo-page{padding:10px;border:1px solid #dde5d8;border-radius:10px;background:#fafcf8;min-width:0}.photo-page img{display:block;width:100%;height:150px;object-fit:contain;background:white}.photo-page>div{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-top:10px;font-size:12px}.photo-page button{padding:7px;font-size:11px}.upload p{margin-bottom:0}@media(max-width:400px){.photo-previews{grid-template-columns:1fr}}
