@@ -148,30 +148,39 @@ def parse_invoice(text, firms=()):
         blocks.append(current)
     seen = set()
     for block in blocks:
-        match = re.match(r'^\d{1,3}\s+(\d{5,14})\s+(.+?)\s+(\d+(?:[.,]\d+)?)\s+(Adet|Ad\.?|Kg|Koli|Lt|Litre)\s+(.+)', block, re.I)
+        match = re.match(r'^\d{1,3}\s+(\d{5,14})\s+(.+?)\s+(\d+(?:[.,]\d+)*)\s*(Adet|Ad\.?|Kg|Koli|Lt|Litre)\s+(.+)', block, re.I)
         if not match:
             result['warnings'].append('Bir ürün satırı okunamadı; fotoğrafla karşılaştırın.')
             continue
         code, product, quantity, unit, tail = match.groups()
         amounts = re.findall(AMOUNT, tail)
         try:
-            qty = Decimal(quantity.replace(',', '.'))
-            if qty <= 0 or len(amounts) < 4:
+            qty = decimal_value(quantity) if ',' in quantity else Decimal(quantity.replace('.','') if re.fullmatch(r'\d{1,3}(?:\.\d{3})+',quantity) else quantity)
+            if qty <= 0 or qty > 99999999 or qty != qty.quantize(Decimal('.0001')) or len(amounts) < 4:
                 raise ValueError()
             # Supported table ends: unit price, VAT %, VAT amount, line net amount.
             vat, net = map(decimal_value, amounts[-2:])
             raw_price = decimal_value(amounts[0])
             if vat < 0 or net <= 0 or raw_price <= 0:
                 raise ValueError()
-            price = ((net + vat) / qty).quantize(Decimal('.0001'), rounding=ROUND_HALF_UP)
+            price = ((net + vat) / qty).quantize(Decimal('.01'), rounding=ROUND_HALF_UP)
             signature = (block.split()[0], code, product, str(qty), str(net), str(vat))
             if signature in seen:
                 continue
             seen.add(signature)
-            result['items'].append(dict(product=product[:200], unit=unit.lower(), price=str(price), code=code,
+            review = ''
+            if net > qty*raw_price+Decimal('.10') or net < qty*raw_price*Decimal('.5'):
+                review = 'Miktar ile satır/birim fiyatı arasında büyük fark var. Adet, koli ve iskonto bilgilerini kontrol edin.'
+                result['warnings'].append('Ürün kodu '+code+': '+review)
+            result['items'].append(dict(row_number=int(block.split()[0]), line_total=str(net+vat), review=review, product=product[:200], unit=unit.lower(), price=str(price), code=code,
                                         quantity=str(qty), source_price=str(raw_price), net=str(net), vat=str(vat)))
         except (InvalidOperation, ValueError):
             result['warnings'].append('Bir ürünün son birim fiyatı hesaplanamadı; elle kontrol edin.')
+    detected = {int(m[1]) for line in lines if (m:=re.match(r'^(\d{1,3})\s+[A-Z0-9]{4,}\b',line,re.I)) and 1<=int(m[1])<=500}
+    expected = list(range(1,max(detected)+1)) if detected else []
+    result['import_check'] = {'expected_rows':expected}
+    result['coverage'] = check_items(result['items'],result['total'],result['import_check'])
+    result['warnings'].extend(result['coverage']['errors'])
     for key, label in [('number','Fatura numarası'), ('issued','Fatura tarihi'), ('total','Ödenecek toplam')]:
         if not result[key]:
             result['warnings'].append(label + ' okunamadı; elle girin.')
@@ -182,4 +191,76 @@ def parse_invoice(text, firms=()):
         if abs(rows_total - Decimal(result['total'])) > Decimal('.05'):
             result['warnings'].append('Okunan ürün satırlarının toplamı fatura toplamıyla uyuşmuyor. Eksik sayfa, farklı masraf veya hatalı okuma olabilir; ürünleri kontrol edin.')
     result['warnings'].append('Vade otomatik tahmin edilmez. Vade gününü girin ve tüm alanları fotoğrafla karşılaştırın.')
+    return result
+
+
+def check_items(items, total, metadata):
+    """Checks coverage and exact source line totals, not OCR semantic correctness."""
+    errors=[]
+    expected=metadata.get('expected_rows',[]) if isinstance(metadata,dict) else []
+    if not isinstance(expected,list) or any(not isinstance(n,int) or not 1<=n<=500 for n in expected):
+        return dict(errors=['Fatura kalem kontrol bilgisi geçersiz. Yeniden okutun.'],read=len(items),expected=0,line_total='0.00')
+    if not expected:
+        errors.append('Faturadaki kalem sayısı belirlenemedi. Yeniden okutun.')
+    numbers=[]
+    gross=Decimal('0')
+    for item in items:
+        try:
+            number=int(item.get('row_number') or 0)
+            quantity=Decimal(str(item.get('quantity') or '0'))
+            price=Decimal(str(item.get('price') or '0'))
+            amount=Decimal(str(item.get('line_total') or 'NaN'))
+            if not all(v.is_finite() for v in (quantity,price,amount)) or quantity<=0 or price<=0 or amount<=0 or amount>999999999:
+                raise ValueError()
+            if abs(quantity*price-amount)>quantity*Decimal('.005')+Decimal('.02'):
+                errors.append(f'{number}. satırın miktarı × birim fiyatı, satır toplamıyla uyuşmuyor.')
+            gross+=amount
+            numbers.append(number)
+        except (ValueError,TypeError,InvalidOperation):
+            errors.append('Ürün miktarı, fiyatı, sıra no ve KDV dahil satır toplamı eksiksiz girilmeli.')
+    missing=sorted(set(expected)-set(numbers))
+    if missing:
+        errors.append('Eksik fatura kalemleri: '+', '.join(map(str,missing))+'. Eksik kalemlerle kaydedilemez.')
+    if len(numbers)!=len(set(numbers)):
+        errors.append('Aynı sıra numarası birden fazla kez girilmiş.')
+    if set(numbers)-set(expected):
+        errors.append('Faturanın sıra numaralarıyla ürün listesi uyuşmuyor.')
+    try:
+        target=Decimal(str(total))
+        if not target.is_finite() or target<=0 or abs(target-gross)>Decimal('.02'):
+            errors.append('KDV dahil ürün satır toplamları, ödenecek fatura toplamıyla uyuşmuyor.')
+    except InvalidOperation:
+        errors.append('Fatura toplamı okunamadı veya eksik.')
+    return dict(errors=list(dict.fromkeys(errors)),read=len(items),expected=len(expected),line_total=str(gross.quantize(Decimal('.01'))))
+
+
+def merge_readings(readings):
+    """Use a complete table and headers from separate OCR layouts, without mixing rows."""
+    result=dict(number='',issued='',total='',supplier='',firm_id=None,items=[],warnings=[],sources={})
+    for key,label in [('number','Fatura numarası'),('issued','Fatura tarihi'),('total','Fatura toplamı')]:
+        values={r[key] for r in readings if r.get(key)}
+        if len(values)==1:
+            result[key]=next(iter(values))
+            result['sources'][key]=next(r.get('sources',{}).get(key,r[key]) for r in readings if r.get(key))
+        elif len(values)>1:
+            result['warnings'].append(label+' farklı okumalarda çelişkili çıktı; fotoğrafla kontrol edin.')
+        else:
+            result['warnings'].append(label+' okunamadı; elle girin.')
+    firms={r['firm_id'] for r in readings if r.get('firm_id')}
+    if len(firms)==1:
+        result['firm_id']=next(iter(firms))
+    else:
+        result['warnings'].append('Firma eşleşmesini kontrol edin.')
+    result['supplier']=next((r['supplier'] for r in readings if r.get('firm_id')==result['firm_id'] and r.get('supplier')),next((r['supplier'] for r in readings if r.get('supplier')),''))
+    expected=sorted({n for r in readings for n in r.get('import_check',{}).get('expected_rows',[])})
+    result['import_check']={'expected_rows':expected}
+    def table_score(reading):
+        check=check_items(reading['items'],result['total'],result['import_check'])
+        return not check['errors'],len(reading['items']),-len(check['errors'])
+    chosen=max(readings,key=table_score)
+    result['items']=chosen['items']
+    result['coverage']=check_items(result['items'],result['total'],result['import_check'])
+    result['warnings'].extend(result['coverage']['errors'])
+    result['warnings'].extend(i['review'] for i in result['items'] if i.get('review'))
+    result['warnings'].append('Vade gününü girin; ürünleri ve miktarları fotoğrafla kontrol ederek onaylayın.')
     return result

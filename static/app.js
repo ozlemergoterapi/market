@@ -1,8 +1,8 @@
-let state, selectedPhoto = null, selectedPhotos = [], photoLoading = false;
+let state, selectedPhoto = null, selectedPhotos = [], photoLoading = false, activeImportCheck = null;
 const $ = s => document.querySelector(s);
 const esc = x => String(x ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const currency = cents => new Intl.NumberFormat('tr-TR',{style:'currency',currency:'TRY'}).format(cents/100);
-const unitCurrency = cents => new Intl.NumberFormat('tr-TR',{style:'currency',currency:'TRY',minimumFractionDigits:2,maximumFractionDigits:4}).format(cents/100);
+const unitCurrency = cents => new Intl.NumberFormat('tr-TR',{style:'currency',currency:'TRY',minimumFractionDigits:2,maximumFractionDigits:2}).format(cents/100);
 const niceDate = s => new Date(s+'T12:00:00').toLocaleDateString('tr-TR',{day:'numeric',month:'short',year:'numeric'});
 async function api(path, data) {
   const r = await fetch('/api/'+path,data===undefined?{}:{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});
@@ -23,9 +23,9 @@ function invoiceTable(list){
 function render(){
   let banner=$('#price-notification');
   if(!banner){banner=document.createElement('div');banner.id='price-notification';banner.className='tip';$('#overview').before(banner);}
-  const pending=state.alerts.filter(a=>!a.approved).length;
-  banner.hidden=!pending;
-  banner.innerHTML=`<b>${pending} fiyat değişimi onayınızı bekliyor.</b><span>Artış ve düşüşlerin tamamını kontrol edin. Yanlış okunan fiyatı faturadan düzeltebilirsiniz.</span><button id="review-prices">Fiyat değişimlerini incele</button>`;
+  const pending=state.alerts.filter(a=>!a.approved).length;const matching=(state.product_suggestions||[]).length;
+  banner.hidden=!(pending||matching);
+  banner.innerHTML=`<b>${pending} fiyat değişimi · ${matching} ürün eşleştirmesi onay bekliyor.</b><span>Artış ve düşüşlerin tamamını kontrol edin. Yanlış okunan fiyatı faturadan düzeltebilirsiniz.</span><button id="review-prices">Fiyat değişimlerini incele</button>`;
   banner.querySelector('button').onclick=()=>$('[data-tab=prices]').click();
 
   $('#date').textContent=new Date(state.today+'T12:00:00').toLocaleDateString('tr-TR',{weekday:'long',day:'numeric',month:'long',year:'numeric'});
@@ -41,7 +41,8 @@ function render(){
   const search=$('#search').value.toLocaleLowerCase('tr');
   $('#invoice-list').innerHTML=invoiceTable(state.invoices.filter(i=>(i.firm+' '+i.number).toLocaleLowerCase('tr').includes(search)));
   $('#firm-list').innerHTML=state.firms.length?state.firms.map(f=>`<article class="firm-card"><h2>${esc(f.name)}</h2><p>Kalan cari borç</p><strong>${currency(f.balance)}</strong><p><button data-edit-firm="${f.id}">Düzelt</button> <button data-delete-firm="${f.id}" class="delete-button">Sil</button></p></article>`).join(''):empty('İlk firmanızı ekleyin.','Faturalarını takip edeceğiniz tedarikçilerinizi buradan kaydedin.');
-  $('#price-list').innerHTML=state.alerts.length?table(['Ürün / Firma','Önceki fiyat','Yeni fiyat','Değişim','Onay'],state.alerts.map(a=>`<tr><td><strong>${esc(a.product)}</strong><small>${esc(a.unit)} · ${esc(a.firm)} · ${niceDate(a.issued)} · ${esc(a.number)}</small></td><td>${unitCurrency(a.old_price)}</td><td>${unitCurrency(a.price)}</td><td><span class="badge ${a.change>0?'late':''}">${a.change>0?'↑':'↓'} %${Math.abs(a.change).toLocaleString('tr-TR')}</span></td><td>${a.approved?'<span class="badge">Onaylandı</span>':`<button data-approve="${a.fingerprint}" class="primary">Değişimi onayla</button> <button data-edit-invoice="${a.invoice_id}">Faturayı düzelt</button>`}</td></tr>`)):empty('Henüz fiyat değişimi yok.','Aynı firmanın aynı ürün ve ambalajını iki faturada kaydettiğinizde değişim burada görünür.');
+  $('#price-list').innerHTML=state.alerts.length?table(['Ürün / Firma','Önceki fiyat','Yeni fiyat','Değişim','Onay'],state.alerts.map(a=>`<tr><td><strong>${esc(a.product)}</strong><small>${esc(a.unit)} · Kod: ${esc(a.code||'—')} · ${esc(a.matched_by||'')} · ${esc(a.firm)} · ${niceDate(a.issued)} · ${esc(a.number)}</small></td><td>${unitCurrency(a.old_price)}<small>${esc(a.old_product||a.product)}</small></td><td>${unitCurrency(a.price)}</td><td><span class="badge ${a.change>0?'late':''}">${a.change>0?'↑':'↓'} %${Math.abs(a.change).toLocaleString('tr-TR')}</span></td><td>${a.approved?'<span class="badge">Onaylandı</span>':`<button data-approve="${a.fingerprint}" class="primary">Değişimi onayla</button> <button data-edit-invoice="${a.invoice_id}">Faturayı düzelt</button>`}</td></tr>`)):empty('Henüz fiyat değişimi yok.','Aynı firmanın aynı ürün ve ambalajını iki faturada kaydettiğinizde değişim burada görünür.');
+  renderProductSuggestions();
   $('#payment-list').innerHTML=state.payments.length?table(['Firma / Fatura','Ödeme tarihi','Ödenen',''],state.payments.map(p=>{const i=state.invoices.find(i=>i.id===p.invoice_id);return `<tr><td>${esc(i.firm)}<small>${esc(i.number)}</small></td><td>${niceDate(p.paid_on)}</td><td>${currency(p.amount)}</td><td><button data-edit-payment="${p.id}">Düzelt</button> <button data-delete-payment="${p.id}" class="delete-button">Sil</button></td></tr>`;})):empty('Henüz ödeme kaydı yok.','Fatura satırındaki “Ödeme kaydet” düğmesini kullanın.');
 }
 async function refresh(){state=await api('state');render();}
@@ -57,10 +58,10 @@ $('#new-firm').onclick=()=>{setMode('firm',null);$('#firm-form').reset();$('#fir
 $('#new-invoice').onclick=()=>{
   if(!state)return;
   if(!state.firms.length){toast('Önce faturanın ait olduğu firmayı ekleyin.');$('[data-tab="firms"]').click();$('#new-firm').click();return;}
-  ocrGeneration++;setMode('invoice',null);$('#invoice-form').reset();$('#invoice-form .form-error').textContent='';selectedPhoto=null;selectedPhotos=[];
+  activeImportCheck=null;ocrGeneration++;setMode('invoice',null);$('#invoice-form').reset();$('#invoice-form .form-error').textContent='';selectedPhoto=null;selectedPhotos=[];
   [...$('#invoice-form').elements].forEach(e=>{delete e.dataset.userEdited;e.title='';});
-  renderSelectedPhotos();$('#ocr-text').hidden=true;$('#ocr-review').hidden=true;$('#ocr-status').textContent='Fotoğraf isteğe bağlıdır. Okunan yazılar otomatik kaydedilmez.';
-  $('#item-rows').innerHTML='';$('#due-preview').value='';
+  renderSelectedPhotos();$('#ocr-text').hidden=true;$('#copy-ocr').hidden=true;$('#ocr-review').hidden=true;$('#ocr-status').textContent='Fotoğraf isteğe bağlıdır. Okunan yazılar otomatik kaydedilmez.';
+  $('#item-rows').innerHTML='';renderImportCheck();$('#due-preview').value='';
   $('#firm-select').innerHTML=state.firms.map(f=>`<option value="${f.id}">${esc(f.name)}</option>`).join('');
   $('#invoice-form [name=issued]').value=state.today;$('#invoice-dialog').showModal();
 };
@@ -69,8 +70,21 @@ $('#invoice-form [name=issued]').oninput=updateDue;$('#invoice-form [name=days]'
 $('#due-preview').oninput=()=>{const issued=$('#invoice-form [name=issued]').value,due=$('#due-preview').value;if(issued&&due)$('#invoice-form [name=days]').value=Math.round((new Date(due)-new Date(issued))/86400000);};
 $('#add-item').onclick=()=>{
   const row=document.createElement('div');row.className='item-row';
-  row.innerHTML='<input class="product" aria-label="Ürün adı" placeholder="Marka ve ürün adı" required maxlength="200" list="products"><input class="unit" aria-label="Ambalaj ve fiyat birimi" placeholder="1 litre / adet" required maxlength="200"><input class="price" aria-label="Son birim fiyat TL" type="number" step="0.0001" min="0.0001" placeholder="Son fiyat TL" required><button type="button" aria-label="Ürün satırını sil">Sil</button>';
-  row.querySelector('button').onclick=()=>row.remove();$('#item-rows').append(row);
+  row.innerHTML='<label class="item-product">Ürün adı<input class="product" aria-label="Ürün adı" placeholder="Marka, ürün ve gramaj" required maxlength="200"></label><label>Faturadaki sıra no<input class="row-number" aria-label="Faturadaki sıra no" type="number" min="1" max="500" step="1" placeholder="Örn. 1"></label><label>Ürün kodu<input class="code" aria-label="Ürün kodu" placeholder="Faturadaki kod" maxlength="100"></label><label>Miktar<input class="quantity" aria-label="Ürün miktarı" type="number" step="0.0001" min="0.0001" placeholder="Örn. 18" required></label><label>Birim / ambalaj<input class="unit" aria-label="Ambalaj ve fiyat birimi" placeholder="Adet / koli / kg" required maxlength="200"></label><label>Son birim fiyat (TL)<input class="price" aria-label="Son birim fiyat TL" type="number" step="0.01" min="0.01" placeholder="Son fiyat TL" required></label><label>KDV dahil satır toplamı (TL)<input class="line-total" aria-label="KDV dahil satır toplamı TL" type="number" step="0.01" min="0.01" placeholder="Faturadaki satır tutarı"></label><button type="button" aria-label="Ürün satırını sil">Sil</button>';
+  function recalculatePrice(){
+    const quantity=Number(row.querySelector('.quantity').value),gross=Number(row.querySelector('.line-total').value);
+    if(Number.isFinite(quantity)&&quantity>0&&Number.isFinite(gross)&&gross>0){
+      row.querySelector('.price').value=(gross/quantity).toFixed(2);
+      const evidence=row.querySelector('.item-evidence');
+      if(evidence)evidence.textContent='Miktar veya satır toplamı değişti. Son birim fiyat yeniden hesaplandı; kontrol edin.';
+    }
+  }
+  row.querySelector('.quantity').oninput=recalculatePrice;
+  row.querySelector('.line-total').oninput=recalculatePrice;
+
+
+  row.querySelector('.row-number').required=Boolean(activeImportCheck);row.querySelector('.line-total').required=Boolean(activeImportCheck);
+  row.querySelector('button').onclick=()=>{row.remove();renderImportCheck();};$('#item-rows').append(row);
 };
 function photoBytes(value){
   const base64=value.split(',')[1]||'';
@@ -84,7 +98,7 @@ function renderSelectedPhotos(){
 function photoSelectionChanged(){
   ocrGeneration++;
   $('.confirm input').checked=false;
-  $('#ocr-text').hidden=true;$('#ocr-review').hidden=true;
+  $('#ocr-text').hidden=true;$('#copy-ocr').hidden=true;$('#ocr-review').hidden=true;
   renderSelectedPhotos();
   $('#ocr-status').textContent=selectedPhotos.length+' fotoğraf eklendi. Tüm sayfaları okumak için “Fotoğrafı oku ve alanları doldur” düğmesine basın. Önceden doldurulmuş alanları yeniden kontrol edin.';
 }
@@ -127,7 +141,7 @@ $('#read-photo').onclick=async()=>{
     const result=await api('ocr',{photos:selectedPhotos.length?selectedPhotos:[requestedPhoto]});
     if(generation!==ocrGeneration||selectedPhoto!==requestedPhoto||!$('#invoice-dialog').open)return;
     const draft=result.draft;
-    $('#ocr-text').value=result.text;$('#ocr-text').hidden=false;
+    $('#ocr-text').value=result.text;$('#ocr-text').hidden=false;$('#copy-ocr').hidden=false;
     for(const key of ['number','issued','total']){
       if(draft[key])form.elements[key].value=draft[key];
       else if(key==='issued'&&!form.dataset.editId&&!form.elements.issued.dataset.userEdited)form.elements.issued.value='';
@@ -135,16 +149,20 @@ $('#read-photo').onclick=async()=>{
     }
     if(draft.firm_id)form.elements.firm_id.value=draft.firm_id;
     $('#due-preview').value='';updateDue();
+    if(draft.import_check)activeImportCheck=draft.import_check;
     if(draft.items.length)$('#item-rows').innerHTML='';
     draft.items.forEach(item=>{
       $('#add-item').click();const row=$('#item-rows').lastElementChild;
       row.querySelector('.product').value=item.product;
       row.querySelector('.unit').value=item.unit;
-      row.querySelector('.price').value=item.price;
+      row.querySelector('.price').value=Number(item.price).toFixed(2);row.querySelector('.row-number').value=item.row_number||'';row.querySelector('.line-total').value=item.line_total||'';
+      row.querySelector('.quantity').value=item.quantity||'';row.querySelector('.code').value=item.code||'';
+      row.dataset.sourceNet=item.net;row.dataset.sourceVat=item.vat;
       const evidence=document.createElement('small');evidence.className='item-evidence';evidence.textContent=`Kod: ${item.code} · Miktar: ${item.quantity} · Satır: ${item.net} + KDV ${item.vat} TL`;row.append(evidence);
+      if(item.review){row.classList.add('needs-review');const review=document.createElement('label');review.className='item-review';const check=document.createElement('input');check.type='checkbox';check.required=true;review.append(check,document.createTextNode(item.review+' Bu satırı kontrol ettim.'));row.append(review);}
       row.title=`Ürün kodu: ${item.code} · Miktar: ${item.quantity} · Faturadaki birim fiyat: ${item.source_price} · KDV hariç satır: ${item.net} · KDV: ${item.vat}`;
     });
-    $('.confirm input').checked=false;
+    renderImportCheck();$('.confirm input').checked=false;
     $('#ocr-review').hidden=false;
     $('#ocr-review').textContent=(draft.supplier?'Okunan firma: '+draft.supplier+'\n':'')+draft.warnings.join('\n');
     $('#ocr-status').textContent=`${draft.items.length} ürün satırı ve okunabilen fatura alanları dolduruldu. Henüz kaydedilmedi. Tüm sayfaların eksiksiz okunduğunu kontrol edin; boş alanları tamamlayın. Birim fiyatlar satır tutarı + KDV üzerinden hesaplandı.`;
@@ -162,7 +180,8 @@ for(const [id,path] of [['firm','firms'],['invoice','invoices'],['payment','paym
     e.preventDefault();const form=e.target,button=form.querySelector('button.primary'),error=form.querySelector('.form-error');error.textContent='';
     if((photoLoading||$('#read-photo').disabled)&&id==='invoice'){error.textContent='Fotoğrafın yüklenmesini bekleyin.';return;}
     const data=Object.fromEntries(new FormData(form));
-    if(id==='invoice'){data.photo=selectedPhotos.length?null:selectedPhoto;data.photos=selectedPhotos;data.items=[...document.querySelectorAll('.item-row')].map(r=>({product:r.querySelector('.product').value,unit:r.querySelector('.unit').value,price:r.querySelector('.price').value}));}
+    if(id==='invoice'){data.photo=selectedPhotos.length?null:selectedPhoto;data.photos=selectedPhotos;data.items=[...document.querySelectorAll('.item-row')].map(r=>({product:r.querySelector('.product').value,unit:r.querySelector('.unit').value,price:r.querySelector('.price').value,quantity:r.querySelector('.quantity').value,code:r.querySelector('.code').value,net:r.dataset.sourceNet||null,vat:r.dataset.sourceVat||null,row_number:r.querySelector('.row-number').value,line_total:r.querySelector('.line-total').value}));}
+    if(id==='invoice'){data.import_check=activeImportCheck;const errors=renderImportCheck();if(errors.length){error.textContent='Eksik veya tutarsız ürünlerle kaydedilemez. '+errors.join(' ');return;}}
     const editing=form.dataset.editId;
     if(editing)data.id=Number(editing);
     button.disabled=true;
@@ -190,8 +209,9 @@ document.addEventListener('click',async e=>{
   }
   if(invoice){
     const i=state.invoices.find(i=>i.id===Number(invoice.dataset.editInvoice));$('#new-invoice').click();setMode('invoice',i.id);
-    const form=$('#invoice-form');form.elements.firm_id.value=i.firm_id;form.elements.number.value=i.number;form.elements.issued.value=i.issued;form.elements.days.value=Math.round((new Date(i.due)-new Date(i.issued))/86400000);form.elements.total.value=(i.total/100).toFixed(2);updateDue();
-    state.items.filter(t=>t.invoice_id===i.id).forEach(t=>{$('#add-item').click();const row=$('#item-rows').lastElementChild;row.querySelector('.product').value=t.product;row.querySelector('.unit').value=t.unit;row.querySelector('.price').value=t.unit_price||(t.price/100).toFixed(4);});
+    const form=$('#invoice-form');const metadata=JSON.parse(i.import_meta||'{}');activeImportCheck=metadata.expected_rows?metadata:null;form.elements.firm_id.value=i.firm_id;form.elements.number.value=i.number;form.elements.issued.value=i.issued;form.elements.days.value=Math.round((new Date(i.due)-new Date(i.issued))/86400000);form.elements.total.value=(i.total/100).toFixed(2);updateDue();
+    state.items.filter(t=>t.invoice_id===i.id).forEach(t=>{$('#add-item').click();const row=$('#item-rows').lastElementChild;row.querySelector('.product').value=t.product;row.querySelector('.unit').value=t.unit;row.querySelector('.price').value=Number(t.unit_price||t.price/100).toFixed(2);row.querySelector('.row-number').value=t.row_number||'';row.querySelector('.line-total').value=t.line_total||'';row.querySelector('.quantity').value=t.quantity||'';row.querySelector('.code').value=t.code||'';if(t.source_net!==''&&t.source_vat!==''){row.dataset.sourceNet=t.source_net;row.dataset.sourceVat=t.source_vat;const evidence=document.createElement('small');evidence.className='item-evidence';evidence.textContent='Kaynak satır: '+t.source_net+' + KDV '+t.source_vat+' TL';row.append(evidence);}});
+    renderImportCheck();
     if(i.has_photo){
       photoLoading=true;form.querySelector('button.primary').disabled=true;
       try{const r=await api('photo/'+i.id);selectedPhotos=r.photos||[r.photo];renderSelectedPhotos();}
@@ -243,4 +263,54 @@ document.addEventListener('click',async e=>{
   catch(error){toast(error.message);button.disabled=false;}
 });
 
-$('#invoice-form').addEventListener('input',event=>{event.target.dataset.userEdited='1';});
+$('#invoice-form').addEventListener('input',event=>{event.target.dataset.userEdited='1';if(event.target!==$('.confirm input'))$('.confirm input').checked=false;renderImportCheck();});
+
+function renderImportCheck(){
+  const panel=$('#item-check');
+  panel.hidden=!activeImportCheck;
+  if(!activeImportCheck)return [];
+  const rows=[...document.querySelectorAll('.item-row')],expected=activeImportCheck.expected_rows||[],numbers=rows.map(r=>Number(r.querySelector('.row-number').value)),errors=[];
+  const missing=expected.filter(n=>!numbers.includes(n));
+  if(!expected.length)errors.push('Faturanın kalem sayısı belirlenemedi. Yeniden okutun.');
+  if(missing.length)errors.push('Eksik sıra no: '+missing.join(', ')+'.');
+  if(new Set(numbers).size!==numbers.length)errors.push('Tekrarlanan sıra numarası var.');
+  if(numbers.some(n=>!expected.includes(n)))errors.push('Sıra numaraları faturayla uyuşmuyor.');
+  let total=0;
+  rows.forEach((row,index)=>{
+    const quantity=Number(row.querySelector('.quantity').value),price=Number(row.querySelector('.price').value),line=Number(row.querySelector('.line-total').value);
+    if(!Number.isFinite(quantity)||quantity<=0||!Number.isFinite(price)||price<=0||!Number.isFinite(line)||line<=0)errors.push((index+1)+'. ürünün miktar, fiyat ve satır toplamını doldurun.');
+    else{total+=Math.round(line*100);if(Math.abs(quantity*price-line)>quantity*.005+.020001)errors.push((index+1)+'. ürünün miktar × fiyatı, satır toplamıyla uyuşmuyor.');}
+  });
+  const target=Math.round(Number($('#invoice-form [name=total]').value)*100);
+  if(!target||Math.abs(total-target)>2)errors.push('Ürün satır toplamları ile fatura toplamı uyuşmuyor.');
+  panel.classList.toggle('check-error',errors.length>0);
+  panel.textContent='Faturada beklenen: '+expected.length+' kalem · Listedeki: '+rows.length+' kalem · Satırların toplamı: '+currency(total)+'\n'+(errors.length?errors.join('\n'):'Kalem sayısı ve satır toplamları uyumlu. Ürün adlarını, kodlarını ve miktarları ayrıca fotoğraftan doğrulayın.');
+  return errors;
+}
+
+function renderProductSuggestions(){
+  let container=$('#product-matches');
+  if(!container){container=document.createElement('div');container.id='product-matches';container.className='panel';$('#price-list').before(container);}
+  const suggestions=state.product_suggestions||[],unmatched=state.unmatched_products||[],history=state.product_match_history||[];
+  container.hidden=!(suggestions.length||unmatched.length||history.length);
+  container.innerHTML=(suggestions.length?'<h2>Bu ürünler aynı mı?</h2><p class="muted">Belirsiz eşleşmeler onayınız olmadan fiyat karşılaştırmasına alınmaz. Kod, ürün, gramaj ve birimi kontrol edin.</p>'+table(['Yeni faturadaki ürün','Önceki faturadaki ürün','Karar'],suggestions.map(s=>`<tr><td><strong>${esc(s.current.product)}</strong><small>Kod: ${esc(s.current.code||'Yok')} · ${esc(s.current.unit)} · ${currency(s.current.price)} · ${esc(s.current.firm)} · ${esc(s.current.number)}</small></td><td><strong>${esc(s.previous.product)}</strong><small>Kod: ${esc(s.previous.code||'Yok')} · ${esc(s.previous.unit)} · ${currency(s.previous.price)} · ${esc(s.previous.number)}</small></td><td><button data-match-product="${s.fingerprint}" data-decision="same">Aynı ürün</button> <button data-match-product="${s.fingerprint}" data-decision="different">Farklı ürün</button></td></tr>`)):'')+(unmatched.length?'<details class="tip"><summary>'+unmatched.length+' ürünün geçmiş fiyatı eşleşmedi</summary><p>Yeni ürün veya okunamayan kod/ad olabilir. Bu ürünlerde fiyat değişmediği varsayılmaz. Faturadan ad, kod ve birimi kontrol edin.</p>'+unmatched.map(i=>`<p>${esc(i.product)} · ${esc(i.code||'Kod yok')} · ${esc(i.firm)} · ${esc(i.number)} <button data-edit-invoice="${i.invoice_id}">Faturayı düzelt</button></p>`).join('')+'</details>':'')+(history.length?'<details class="tip"><summary>Ürün eşleştirme kararları</summary>'+history.map(h=>`<p>${esc(h.left_name)} ↔ ${esc(h.right_name)} · ${h.decision==='same'?'Aynı ürün':'Farklı ürün'} <button data-unmatch-product="${h.fingerprint}">Kararı kaldır</button></p>`).join('')+'</details>':'');
+}
+document.addEventListener('click',async event=>{
+  const button=event.target.closest('[data-match-product]');if(!button)return;
+  if(button.dataset.decision==='same'&&!window.confirm('Bu iki kaydın aynı ürün, gramaj ve fiyat birimine ait olduğunu onaylıyor musunuz? Fiyat geçmişleri birlikte karşılaştırılacak.'))return;
+  button.disabled=true;
+  try{await api('products/match',{fingerprint:button.dataset.matchProduct,decision:button.dataset.decision});await refresh();toast('Ürün eşleştirme kararı kaydedildi.');}catch(error){toast(error.message);button.disabled=false;}
+});
+
+document.addEventListener('click',async event=>{
+  const button=event.target.closest('[data-unmatch-product]');if(!button)return;
+  if(!window.confirm('Bu eşleştirme kararını kaldırmak istiyor musunuz? Fiyat karşılaştırmaları yeniden hesaplanacak.'))return;
+  button.disabled=true;
+  try{await api('products/unmatch',{fingerprint:button.dataset.unmatchProduct});await refresh();toast('Eşleştirme kararı kaldırıldı.');}catch(error){toast(error.message);button.disabled=false;}
+});
+
+$('#copy-ocr').onclick=async()=>{
+  const field=$('#ocr-text');
+  try{await navigator.clipboard.writeText(field.value);$('#ocr-status').textContent='Okunan metin kopyalandı. Hatalı alanları incelemek için sohbete yapıştırabilirsiniz.';}
+  catch{field.focus();field.select();$('#ocr-status').textContent='Metin seçildi. Mac’te Command + C, Windows’ta Control + C ile kopyalayabilirsiniz.';}
+};

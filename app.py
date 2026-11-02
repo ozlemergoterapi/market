@@ -12,7 +12,8 @@ from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from zoneinfo import ZoneInfo
-from invoice_parser import parse_invoice
+from invoice_parser import parse_invoice, check_items, merge_readings
+from product_matching import compare_items, identity as product_identity
 
 ROOT = Path(__file__).resolve().parent
 DB = Path(os.environ.get('MARKET_DB', str(ROOT / 'data/market.sqlite3')))
@@ -29,6 +30,7 @@ def connect():
 def init():
     with connect() as db:
         db.executescript('''
+        CREATE TABLE IF NOT EXISTS product_matches(fingerprint TEXT PRIMARY KEY,left_key TEXT NOT NULL,right_key TEXT NOT NULL,decision TEXT NOT NULL,decided_on TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS price_reviews(fingerprint TEXT PRIMARY KEY, reviewed_on TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS edits(id INTEGER PRIMARY KEY, entity TEXT NOT NULL, record_id INTEGER NOT NULL, changed_on TEXT NOT NULL, before_json TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS firms(id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE);
@@ -43,11 +45,17 @@ def init():
         if 'identity' not in {r[1] for r in db.execute('PRAGMA table_info(invoices)')}:
             db.execute("ALTER TABLE invoices ADD COLUMN identity TEXT NOT NULL DEFAULT ''")
         db.execute("UPDATE invoices SET identity=lower(hex(randomblob(16))) WHERE identity=''")
+        if 'import_meta' not in {r[1] for r in db.execute('PRAGMA table_info(invoices)')}:
+            db.execute("ALTER TABLE invoices ADD COLUMN import_meta TEXT NOT NULL DEFAULT '{}'")
         if 'extra_photos' not in {r[1] for r in db.execute('PRAGMA table_info(invoices)')}:
             db.execute("ALTER TABLE invoices ADD COLUMN extra_photos TEXT NOT NULL DEFAULT '[]'")
         if 'unit_price' not in {r[1] for r in db.execute('PRAGMA table_info(items)')}:
             db.execute("ALTER TABLE items ADD COLUMN unit_price TEXT NOT NULL DEFAULT ''")
         db.execute("UPDATE items SET unit_price=printf('%.4f',price/100.0) WHERE unit_price=''")
+        item_columns = {r[1] for r in db.execute('PRAGMA table_info(items)')}
+        for column in ('quantity','code','source_net','source_vat','row_number','line_total'):
+            if column not in item_columns:
+                db.execute(f"ALTER TABLE items ADD COLUMN {column} TEXT NOT NULL DEFAULT ''")
 
 
 def money(value):
@@ -83,10 +91,11 @@ def state(today=None):
     today = today or datetime.now(ZoneInfo('Europe/Istanbul')).date()
     with connect() as db:
         firms = [dict(r) for r in db.execute('SELECT * FROM firms ORDER BY name')]
-        invoices = [dict(r) for r in db.execute('''SELECT i.id,i.firm_id,f.name AS firm,i.number,i.issued,i.due,i.total,
+        invoices = [dict(r) for r in db.execute('''SELECT i.id,i.firm_id,f.name AS firm,i.number,i.issued,i.due,i.total,i.import_meta,
           COALESCE((SELECT SUM(amount) FROM payments WHERE invoice_id=i.id),0) AS paid,
           photo IS NOT NULL AS has_photo FROM invoices i JOIN firms f ON f.id=i.firm_id ORDER BY due,i.id''')]
         payments = [dict(r) for r in db.execute('SELECT * FROM payments ORDER BY paid_on DESC,id DESC')]
+        product_decisions=[dict(r) for r in db.execute('SELECT * FROM product_matches')]
         reviews = {r['fingerprint'] for r in db.execute('SELECT fingerprint FROM price_reviews')}
         items = [dict(r) for r in db.execute('''SELECT t.*,i.firm_id,i.issued,i.number,i.identity,f.name AS firm FROM items t
           JOIN invoices i ON i.id=t.invoice_id JOIN firms f ON f.id=i.firm_id ORDER BY i.issued,i.id,t.id''')]
@@ -104,17 +113,18 @@ def state(today=None):
             totals['overdue'] += i['remaining']
         if today < due <= today + timedelta(days=7):
             totals['upcoming'] += i['remaining']
-    previous, alerts = {}, []
-    for item in items:
-        key = (item['firm_id'], item['product'].casefold(), item['unit'].casefold())
-        old = previous.get(key)
-        if old and old['invoice_id'] != item['invoice_id'] and old['price'] != item['price']:
-            fingerprint = hashlib.sha256(json.dumps([key,old['identity'],old['invoice_id'],old['issued'],old['price'],item['identity'],item['invoice_id'],item['issued'],item['price']],ensure_ascii=False).encode()).hexdigest()
-            alerts.append(dict(item, fingerprint=fingerprint, approved=fingerprint in reviews, old_price=old['price'], change=round((item['price'] / old['price'] - 1) * 100, 2)))
-        previous[key] = item
+    comparisons,suggestions,unmatched=compare_items(items,product_decisions)
+    names={product_identity(item):item['product'] for item in items}
+    match_history=[dict(review,left_name=names.get(review['left_key'],json.loads(review['left_key'])[1]),right_name=names.get(review['right_key'],json.loads(review['right_key'])[1])) for review in product_decisions]
+    alerts=[]
+    for comparison in comparisons:
+        item,old=comparison['current'],comparison['previous']
+        if old['price']!=item['price']:
+            fingerprint=hashlib.sha256(json.dumps([comparison['identity'],old['identity'],old['invoice_id'],old['issued'],old['price'],item['identity'],item['invoice_id'],item['issued'],item['price']],ensure_ascii=False).encode()).hexdigest()
+            alerts.append(dict(item,fingerprint=fingerprint,approved=fingerprint in reviews,old_product=old['product'],matched_by=comparison['matched_by'],old_price=old['price'],change=round((item['price']/old['price']-1)*100,2)))
     for f in firms:
         f['balance'] = sum(i['remaining'] for i in invoices if i['firm_id'] == f['id'])
-    return dict(today=today.isoformat(), totals=totals, firms=firms, invoices=invoices, payments=payments, items=items, alerts=alerts[::-1])
+    return dict(today=today.isoformat(), totals=totals, firms=firms, invoices=invoices, payments=payments, items=items, alerts=alerts[::-1],product_suggestions=suggestions,unmatched_products=unmatched,product_match_history=match_history)
 
 
 def audit(db, entity, record_id, before):
@@ -147,6 +157,10 @@ def delete_record(entity, record_id, expected=None):
             db.execute('DELETE FROM payments WHERE invoice_id=?',(invoice['id'],))
             db.execute('DELETE FROM items WHERE invoice_id=?',(invoice['id'],))
             db.execute('DELETE FROM invoices WHERE id=?',(invoice['id'],))
+        if entity=='firm':
+            for review in db.execute('SELECT fingerprint,left_key FROM product_matches').fetchall():
+                if json.loads(review['left_key'])[0]==record_id:
+                    db.execute('DELETE FROM product_matches WHERE fingerprint=?',(review['fingerprint'],))
         if entity != 'invoice':
             db.execute(f'DELETE FROM {tables[entity]} WHERE id=?',(record_id,))
 
@@ -172,6 +186,11 @@ def create_invoice(data, record_id=None):
     items = data.get('items', [])
     if not isinstance(items, list) or len(items) > 500:
         raise ValueError('Ürün listesi geçersiz.')
+    import_metadata = data.get('import_check')
+    if import_metadata is not None:
+        checked=check_items(items,str(Decimal(total)/100),import_metadata)
+        if checked['errors']:
+            raise ValueError('Kalemler eksik veya tutarsız: '+' '.join(checked['errors']))
     rows = []
     for t in items:
         try:
@@ -181,8 +200,37 @@ def create_invoice(data, record_id=None):
         except InvalidOperation:
             raise ValueError('Birim fiyat geçersiz.')
         cents = max(1, int((value * 100).quantize(Decimal('1'), rounding=ROUND_HALF_UP)))
-        rows.append((clean(t['product'], 'Ürün'), clean(t['unit'], 'Ambalaj / fiyat birimi'), cents, str(value)))
-    if len({(p.casefold(), u.casefold()) for p,u,_,_ in rows}) != len(rows):
+        quantity = ''
+        if 'quantity' in t:
+            try:
+                quantity_value = Decimal(str(t['quantity']))
+                if not quantity_value.is_finite() or quantity_value <= 0 or quantity_value > 99999999 or quantity_value != quantity_value.quantize(Decimal('.0001')):
+                    raise ValueError('Ürün miktarı sıfırdan büyük ve en fazla dört ondalıklı olmalı.')
+                quantity = str(quantity_value)
+            except InvalidOperation:
+                raise ValueError('Ürün miktarını kontrol edin.')
+        source = []
+        for field in ('net','vat'):
+            raw = t.get(field)
+            if raw is None or raw == '':
+                source.append('')
+            else:
+                try:
+                    number_value = Decimal(str(raw))
+                    if not number_value.is_finite() or number_value < 0 or number_value > 999999999:
+                        raise ValueError('Kaynak satır tutarı geçersiz.')
+                    source.append(str(number_value))
+                except InvalidOperation:
+                    raise ValueError('Kaynak satır tutarı geçersiz.')
+        code = str(t.get('code') or '').strip()
+        if len(code)>100:
+            raise ValueError('Ürün kodu en fazla 100 karakter olabilir.')
+        row_number=str(t.get('row_number') or '')
+        line_total=str(t.get('line_total') or '')
+        if len(row_number)>5 or len(line_total)>30:
+            raise ValueError('Satır bilgileri geçersiz.')
+        rows.append((clean(t['product'], 'Ürün'), clean(t['unit'], 'Ambalaj / fiyat birimi'), cents, str(value), quantity, code, *source,row_number,line_total))
+    if len({(p.casefold(), u.casefold()) for p,u,*_ in rows}) != len(rows):
         raise ValueError('Aynı ürün ve birimi faturada bir kez girin.')
     with connect() as db:
         db.execute('BEGIN IMMEDIATE')
@@ -195,6 +243,12 @@ def create_invoice(data, record_id=None):
             old = db.execute('SELECT * FROM invoices WHERE id=?',(record_id,)).fetchone()
             if not old:
                 raise ValueError('Fatura bulunamadı.')
+            saved_metadata=json.loads(old['import_meta'])
+            if saved_metadata.get('expected_rows') and not import_metadata:
+                checked=check_items(items,str(Decimal(total)/100),saved_metadata)
+                if checked['errors']:
+                    raise ValueError('Kalemler eksik veya tutarsız: '+' '.join(checked['errors']))
+                import_metadata=saved_metadata
             paid = db.execute('SELECT COALESCE(SUM(amount),0) FROM payments WHERE invoice_id=?',(record_id,)).fetchone()[0]
             if total < paid:
                 raise ValueError('Fatura toplamı yapılan ödemelerden az olamaz. Önce yanlış ödemeyi düzeltin.')
@@ -203,8 +257,8 @@ def create_invoice(data, record_id=None):
             audit(db,'invoice',record_id,before)
             db.execute('UPDATE invoices SET firm_id=?,number=?,issued=?,due=?,total=?,photo=? WHERE id=?', (*values,record_id))
             db.execute('DELETE FROM items WHERE invoice_id=?',(record_id,))
-        db.execute('UPDATE invoices SET extra_photos=? WHERE id=?',(json.dumps(photos[1:]),record_id))
-        db.executemany('INSERT INTO items(invoice_id,product,unit,price,unit_price) VALUES(?,?,?,?,?)', [(record_id,*r) for r in rows])
+        db.execute('UPDATE invoices SET extra_photos=?,import_meta=? WHERE id=?',(json.dumps(photos[1:]),json.dumps(import_metadata or {}),record_id))
+        db.executemany('INSERT INTO items(invoice_id,product,unit,price,unit_price,quantity,code,source_net,source_vat,row_number,line_total) VALUES(?,?,?,?,?,?,?,?,?,?,?)', [(record_id,*r) for r in rows])
 
 
 def create_payment(data, record_id=None):
@@ -295,6 +349,15 @@ class Handler(BaseHTTPRequestHandler):
                         raise ValueError('Firma bulunamadı.')
                     audit(db,'firm',int(data['id']),dict(old))
                     db.execute('UPDATE firms SET name=? WHERE id=?',(clean(data['name'],'Firma adı'),int(data['id'])))
+            elif self.path == '/api/products/unmatch':
+                with connect() as db:
+                    db.execute('DELETE FROM product_matches WHERE fingerprint=?',(data['fingerprint'],))
+            elif self.path == '/api/products/match':
+                suggestion=next((s for s in state()['product_suggestions'] if s['fingerprint']==data['fingerprint']),None)
+                if not suggestion or data.get('decision') not in ('same','different'):
+                    raise ValueError('Eşleştirme güncellenmiş veya karar geçersiz. Listeyi yenileyin.')
+                with connect() as db:
+                    db.execute('INSERT OR REPLACE INTO product_matches VALUES(?,?,?,?,?)',(suggestion['fingerprint'],suggestion['left_key'],suggestion['right_key'],data['decision'],datetime.now(ZoneInfo('Europe/Istanbul')).isoformat()))
             elif self.path == '/api/prices/approve':
                 fingerprint = data['fingerprint']
                 if fingerprint not in {a['fingerprint'] for a in state()['alerts']}:
@@ -324,13 +387,11 @@ class Handler(BaseHTTPRequestHandler):
                     return '\n'.join(texts)
                 text = read_pages(6)
                 draft = parse_invoice(text,firms)
-                if not all(draft[k] for k in ('number','issued','total')) or not draft['items']:
+                if not all(draft[k] for k in ('number','issued','total')) or not draft['items'] or draft['coverage']['errors']:
                     alternative_text = read_pages(3)
                     alternative = parse_invoice(alternative_text,firms)
-                    def score(value):
-                        return 10*sum(bool(value[k]) for k in ('number','issued','total'))+min(len(value['items']),8)
-                    if score(alternative)>score(draft):
-                        text,draft = alternative_text,alternative
+                    draft=merge_readings([draft,alternative])
+                    text+='\n--- Diğer okuma ---\n'+alternative_text
                 return self.respond({'text':text,'language':lang,'draft':draft})
             else:
                 return self.respond({'error':'Bulunamadı.'},404)

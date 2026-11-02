@@ -106,6 +106,59 @@ class LedgerTests(unittest.TestCase):
         self.invoice(number='F002',issued='2026-02-01',items=[dict(product='Süt',unit='adet',price='26.3790')])
         self.assertEqual(len(app.state()['alerts']),1)
 
+    def test_quantity_and_product_code_are_saved_and_editable(self):
+        self.invoice(items=[dict(product='Süt 200MLX24',unit='adet',price='26.3789',quantity='18',code='8223298',net='470.13',vat='4.69')])
+        item=app.state()['items'][0]
+        self.assertEqual(item['quantity'],'18')
+        self.assertEqual(item['code'],'8223298')
+        self.assertEqual(item['source_net'],'470.13')
+        app.create_invoice(dict(firm_id=1,number='F001',issued='2026-01-20',days=20,total='1000.50',items=[dict(product='Süt 200MLX24',unit='adet',price='39.5683',quantity='12',code='8223298')]),1)
+        self.assertEqual(app.state()['items'][0]['quantity'],'12')
+
+    def test_invalid_quantity_does_not_save_invoice(self):
+        for quantity in ['0','-2','NaN','', '1.00001']:
+            with self.subTest(quantity=quantity),self.assertRaises(ValueError):
+                self.invoice(items=[dict(product='Süt',unit='adet',price='35',quantity=quantity)])
+        self.assertEqual(app.state()['invoices'],[])
+
+    def test_imported_invoice_cannot_save_with_missing_rows(self):
+        data=dict(firm_id=1,number='CHECKED',issued='2026-01-20',days=20,total='719.09',import_check=dict(expected_rows=[1,2]),
+                  items=[dict(row_number=1,product='Süt 1L',unit='adet',code='12345',quantity='18',price='26.38',line_total='474.82')])
+        with self.assertRaises(ValueError):
+            app.create_invoice(data)
+        self.assertEqual(app.state()['invoices'],[])
+        data['items'].append(dict(row_number=2,product='Su 1L',unit='adet',code='67890',quantity='18',price='13.57',line_total='244.27'))
+        app.create_invoice(data)
+        value=app.state()
+        self.assertEqual(len(value['items']),2)
+        self.assertEqual(value['items'][0]['row_number'],'1')
+        data['items'].pop()
+        data.pop('import_check')
+        with self.assertRaises(ValueError):
+            app.create_invoice(data,1)
+        self.assertEqual(len(app.state()['items']),2)
+
+    def test_code_matches_changed_product_name_and_returns_price_alert(self):
+        self.invoice(items=[dict(product='BENIMO KOMBO 96GX18',unit='adet',price='35',code='8223298')])
+        self.invoice(number='F002',issued='2026-02-01',items=[dict(product='BENIMO K0MBO 96G X18',unit='adet',price='39',code='8223298')])
+        alerts=app.state()['alerts']
+        self.assertEqual(len(alerts),1)
+        self.assertEqual(alerts[0]['matched_by'],'Ürün kodu')
+
+    def test_confirmed_alias_generates_alert_and_can_be_undone(self):
+        self.invoice(items=[dict(product='BENIMO KOMBO 96GX18',unit='adet',price='35')])
+        self.invoice(number='F002',issued='2026-02-01',items=[dict(product='BENIMO K0MBO 96G X18',unit='adet',price='39')])
+        value=app.state()
+        self.assertEqual(value['alerts'],[])
+        suggestion=value['product_suggestions'][0]
+        with app.connect() as db:
+            db.execute('INSERT INTO product_matches VALUES(?,?,?,?,?)',(suggestion['fingerprint'],suggestion['left_key'],suggestion['right_key'],'same','2026-02-01'))
+        self.assertEqual(len(app.state()['alerts']),1)
+        with app.connect() as db:
+            db.execute('DELETE FROM product_matches')
+        self.assertEqual(app.state()['alerts'],[])
+        self.assertEqual(len(app.state()['product_suggestions']),1)
+
     def test_duplicate_invoice_rolls_back(self):
         self.invoice()
         with self.assertRaises(app.sqlite3.IntegrityError):

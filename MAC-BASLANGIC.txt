@@ -38,3 +38,13 @@ kontrol ederek onaylayın. Farklı tablo düzenleri eksik okunabilir.
 BU PAKETİN TEST DURUMU
 Hesaplama testleri ve tarayıcı akışları Linux geliştirme ortamında doğrulandı.
 Mac üzerinde açılış henüz denenmedi; ilk açılışı birlikte kontrol edeceğiz.
+
+ÜRÜNLERİ KONTROL ETME
+Ürün adı, kodu, miktarı ve birimi ayrı alanlardır. Fiyatlar iki ondalıkla
+aktarılır. Eksik sıra numarası veya satır/fatura toplamı uyuşmazlığı varsa
+fotoğraftan oluşturulan kayıt engellenir. Miktarı düzeltince son birim fiyat
+yeniden hesaplanır. Geçmiş faturayla kodu eşleşen ürünler karşılaştırılır;
+belirsiz adlar Fiyat değişimleri bölümünde onayınıza sunulur. Onaylı eşleştirme
+kararlarını aynı bölümden kaldırabilirsiniz. Bu kontroller ürünün fotoğraftan
+yüzde yüz doğru okunduğu anlamına gelmez; ürün adını ve miktarını kontrol edin.
+Hatalı okumada Okunan metni kopyala düğmesi destek için kullanılabilir.
