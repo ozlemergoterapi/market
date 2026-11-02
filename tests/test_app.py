@@ -71,6 +71,33 @@ class LedgerTests(unittest.TestCase):
         self.assertEqual(len(app.state()['firms']),1)
         self.assertEqual(len(app.state()['payments']),1)
 
+    def test_invoice_delete_removes_children_and_recalculates(self):
+        self.invoice()
+        app.create_payment(dict(invoice_id=1,amount='200',paid_on='2026-01-21'))
+        with self.assertRaises(ValueError):
+            app.delete_record('invoice',1,dict(invoices=1,payments=0,items=1))
+        self.assertEqual(len(app.state()['invoices']),1)
+        app.delete_record('invoice',1,dict(invoices=1,payments=1,items=1))
+        value=app.state()
+        self.assertEqual(value['totals']['total'],0)
+        self.assertEqual(value['payments'],[])
+        self.assertEqual(value['items'],[])
+
+    def test_payment_delete_restores_debt(self):
+        self.invoice()
+        app.create_payment(dict(invoice_id=1,amount='200',paid_on='2026-01-21'))
+        app.delete_record('payment',1)
+        self.assertEqual(app.state()['totals']['total'],100050)
+
+    def test_firm_delete_cascades_after_explicit_counts(self):
+        self.invoice()
+        app.create_payment(dict(invoice_id=1,amount='200',paid_on='2026-01-21'))
+        app.delete_record('firm',1,dict(invoices=1,payments=1,items=1))
+        value=app.state()
+        self.assertEqual(value['firms'],[])
+        self.assertEqual(value['invoices'],[])
+        self.assertEqual(value['payments'],[])
+
     def test_duplicate_invoice_rolls_back(self):
         self.invoice()
         with self.assertRaises(app.sqlite3.IntegrityError):

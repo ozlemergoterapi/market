@@ -16,7 +16,7 @@ function invoiceTable(list){
   if(!list.length)return empty('Burada henüz fatura yok.','Firma ve faturanızı eklediğinizde ödeme planınız burada görünecek.');
   return table(['Firma / Fatura','Ödeme tarihi','Kalan borç','Durum',''],list.map(i=>{
     const badge = !i.remaining ? ['','Ödendi'] : i.late_days ? ['late',`${i.late_days} gün gecikti`] : i.due===state.today ? ['today','Bugün'] : ['','Bekliyor'];
-    return `<tr><td><strong>${esc(i.firm)}</strong><small>${esc(i.number)} · ${niceDate(i.issued)}</small></td><td>${niceDate(i.due)}</td><td><strong>${currency(i.remaining)}</strong><small>Toplam ${currency(i.total)}</small></td><td><span class="badge ${badge[0]}">${badge[1]}</span></td><td><button data-edit-invoice="${i.id}">Düzelt</button> ${i.has_photo?`<button data-photo="${i.id}" aria-label="Fatura fotoğrafını aç">▧</button> `:''}${i.remaining?`<button data-pay="${i.id}">Ödeme kaydet</button>`:''}</td></tr>`;
+    return `<tr><td><strong>${esc(i.firm)}</strong><small>${esc(i.number)} · ${niceDate(i.issued)}</small></td><td>${niceDate(i.due)}</td><td><strong>${currency(i.remaining)}</strong><small>Toplam ${currency(i.total)}</small></td><td><span class="badge ${badge[0]}">${badge[1]}</span></td><td><button data-edit-invoice="${i.id}">Düzelt</button> <button data-delete-invoice="${i.id}" class="delete-button">Sil</button> ${i.has_photo?`<button data-photo="${i.id}" aria-label="Fatura fotoğrafını aç">▧</button> `:''}${i.remaining?`<button data-pay="${i.id}">Ödeme kaydet</button>`:''}</td></tr>`;
   }));
 }
 function render(){
@@ -41,7 +41,7 @@ function render(){
   $('#invoice-list').innerHTML=invoiceTable(state.invoices.filter(i=>(i.firm+' '+i.number).toLocaleLowerCase('tr').includes(search)));
   $('#firm-list').innerHTML=state.firms.length?state.firms.map(f=>`<article class="firm-card"><h2>${esc(f.name)}</h2><p>Kalan cari borç</p><strong>${currency(f.balance)}</strong><p><button data-edit-firm="${f.id}">Düzelt</button> <button data-delete-firm="${f.id}" class="delete-button">Sil</button></p></article>`).join(''):empty('İlk firmanızı ekleyin.','Faturalarını takip edeceğiniz tedarikçilerinizi buradan kaydedin.');
   $('#price-list').innerHTML=state.alerts.length?table(['Ürün / Firma','Önceki fiyat','Yeni fiyat','Değişim','Onay'],state.alerts.map(a=>`<tr><td><strong>${esc(a.product)}</strong><small>${esc(a.unit)} · ${esc(a.firm)} · ${niceDate(a.issued)} · ${esc(a.number)}</small></td><td>${currency(a.old_price)}</td><td>${currency(a.price)}</td><td><span class="badge ${a.change>0?'late':''}">${a.change>0?'↑':'↓'} %${Math.abs(a.change).toLocaleString('tr-TR')}</span></td><td>${a.approved?'<span class="badge">Onaylandı</span>':`<button data-approve="${a.fingerprint}" class="primary">Değişimi onayla</button> <button data-edit-invoice="${a.invoice_id}">Faturayı düzelt</button>`}</td></tr>`)):empty('Henüz fiyat değişimi yok.','Aynı firmanın aynı ürün ve ambalajını iki faturada kaydettiğinizde değişim burada görünür.');
-  $('#payment-list').innerHTML=state.payments.length?table(['Firma / Fatura','Ödeme tarihi','Ödenen',''],state.payments.map(p=>{const i=state.invoices.find(i=>i.id===p.invoice_id);return `<tr><td>${esc(i.firm)}<small>${esc(i.number)}</small></td><td>${niceDate(p.paid_on)}</td><td>${currency(p.amount)}</td><td><button data-edit-payment="${p.id}">Düzelt</button></td></tr>`;})):empty('Henüz ödeme kaydı yok.','Fatura satırındaki “Ödeme kaydet” düğmesini kullanın.');
+  $('#payment-list').innerHTML=state.payments.length?table(['Firma / Fatura','Ödeme tarihi','Ödenen',''],state.payments.map(p=>{const i=state.invoices.find(i=>i.id===p.invoice_id);return `<tr><td>${esc(i.firm)}<small>${esc(i.number)}</small></td><td>${niceDate(p.paid_on)}</td><td>${currency(p.amount)}</td><td><button data-edit-payment="${p.id}">Düzelt</button> <button data-delete-payment="${p.id}" class="delete-button">Sil</button></td></tr>`;})):empty('Henüz ödeme kaydı yok.','Fatura satırındaki “Ödeme kaydet” düğmesini kullanın.');
 }
 async function refresh(){state=await api('state');render();}
 document.querySelectorAll('[data-tab]').forEach(b=>b.onclick=()=>{
@@ -67,7 +67,7 @@ $('#invoice-form [name=issued]').oninput=updateDue;$('#invoice-form [name=days]'
 $('#due-preview').oninput=()=>{const issued=$('#invoice-form [name=issued]').value,due=$('#due-preview').value;if(issued&&due)$('#invoice-form [name=days]').value=Math.round((new Date(due)-new Date(issued))/86400000);};
 $('#add-item').onclick=()=>{
   const row=document.createElement('div');row.className='item-row';
-  row.innerHTML='<input class="product" aria-label="Ürün adı" placeholder="Marka ve ürün adı" required maxlength="200" list="products"><input class="unit" aria-label="Ambalaj ve fiyat birimi" placeholder="1 litre / adet" required maxlength="200"><input class="price" aria-label="Son birim fiyat TL" type="number" step="0.01" min="0.01" placeholder="Fiyat TL" required><button type="button" aria-label="Satırı kaldır">×</button>';
+  row.innerHTML='<input class="product" aria-label="Ürün adı" placeholder="Marka ve ürün adı" required maxlength="200" list="products"><input class="unit" aria-label="Ambalaj ve fiyat birimi" placeholder="1 litre / adet" required maxlength="200"><input class="price" aria-label="Son birim fiyat TL" type="number" step="0.01" min="0.01" placeholder="Fiyat TL" required><button type="button" aria-label="Ürün satırını sil">Sil</button>';
   row.querySelector('button').onclick=()=>row.remove();$('#item-rows').append(row);
 };
 $('#photo').onchange=async e=>{
@@ -147,15 +147,29 @@ $('#payment-form [name=invoice_id]').onchange=()=>{
 };
 
 document.addEventListener('click',async e=>{
-  const button=e.target.closest('[data-delete-firm]');
+  const button=e.target.closest('[data-delete-firm],[data-delete-invoice],[data-delete-payment]');
   if(!button)return;
-  const firm=state.firms.find(f=>f.id===Number(button.dataset.deleteFirm));
-  if(!firm)return;
-  if(state.invoices.some(i=>i.firm_id===firm.id)){
-    toast('Bu firmaya ait fatura kayıtları var. Kayıtları korumak için silinemez; firma adını Düzelt ile değiştirebilirsiniz.');return;
+  let path, data, message;
+  if(button.dataset.deletePayment){
+    const payment=state.payments.find(p=>p.id===Number(button.dataset.deletePayment));
+    if(!payment)return;
+    path='payments/delete';data={id:payment.id};
+    message=currency(payment.amount)+' tutarındaki ödeme silinecek. İlgili faturanın kalan borcu bu tutar kadar artacak. Onaylıyor musunuz?';
+  }else{
+    const firmMode=button.dataset.deleteFirm!==undefined;
+    const id=Number(firmMode?button.dataset.deleteFirm:button.dataset.deleteInvoice);
+    const record=(firmMode?state.firms:state.invoices).find(r=>r.id===id);
+    if(!record)return;
+    const invoices=state.invoices.filter(i=>firmMode?i.firm_id===id:i.id===id);
+    const ids=new Set(invoices.map(i=>i.id));
+    const payments=state.payments.filter(p=>ids.has(p.invoice_id));
+    const items=state.items.filter(t=>ids.has(t.invoice_id));
+    path=firmMode?'firms/delete':'invoices/delete';
+    data={id,expected:{invoices:invoices.length,payments:payments.length,items:items.length}};
+    message=(firmMode?record.name+' firması':record.number+' faturası')+' silinecek.\nBağlı '+invoices.length+' fatura, '+payments.length+' ödeme ve '+items.length+' ürün satırı da silinecek.\nCari toplamlar ve fiyat karşılaştırmaları yeniden hesaplanacak. Bu işlem ekrandan geri alınamaz. Onaylıyor musunuz?';
   }
-  if(!window.confirm(firm.name+' firmasını silmek istediğinize emin misiniz?'))return;
+  if(!window.confirm(message))return;
   button.disabled=true;
-  try{await api('firms/delete',{id:firm.id});await refresh();toast('Firma silindi.');}
+  try{await api(path,data);await refresh();toast('Kayıt silindi; ödeme ve cari toplamları güncellendi.');}
   catch(error){toast(error.message);button.disabled=false;}
 });

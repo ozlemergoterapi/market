@@ -39,6 +39,9 @@ def init():
         CREATE TABLE IF NOT EXISTS payments(id INTEGER PRIMARY KEY, invoice_id INTEGER NOT NULL REFERENCES invoices(id),
           amount INTEGER NOT NULL CHECK(amount>0), paid_on TEXT NOT NULL);
         ''')
+        if 'identity' not in {r[1] for r in db.execute('PRAGMA table_info(invoices)')}:
+            db.execute("ALTER TABLE invoices ADD COLUMN identity TEXT NOT NULL DEFAULT ''")
+        db.execute("UPDATE invoices SET identity=lower(hex(randomblob(16))) WHERE identity=''")
 
 
 def money(value):
@@ -79,7 +82,7 @@ def state(today=None):
           photo IS NOT NULL AS has_photo FROM invoices i JOIN firms f ON f.id=i.firm_id ORDER BY due,i.id''')]
         payments = [dict(r) for r in db.execute('SELECT * FROM payments ORDER BY paid_on DESC,id DESC')]
         reviews = {r['fingerprint'] for r in db.execute('SELECT fingerprint FROM price_reviews')}
-        items = [dict(r) for r in db.execute('''SELECT t.*,i.firm_id,i.issued,i.number,f.name AS firm FROM items t
+        items = [dict(r) for r in db.execute('''SELECT t.*,i.firm_id,i.issued,i.number,i.identity,f.name AS firm FROM items t
           JOIN invoices i ON i.id=t.invoice_id JOIN firms f ON f.id=i.firm_id ORDER BY i.issued,i.id,t.id''')]
     totals = dict(today=0, overdue=0, upcoming=0, total=0)
     for i in invoices:
@@ -98,7 +101,7 @@ def state(today=None):
         key = (item['firm_id'], item['product'].casefold(), item['unit'].casefold())
         old = previous.get(key)
         if old and old['invoice_id'] != item['invoice_id'] and old['price'] != item['price']:
-            fingerprint = hashlib.sha256(json.dumps([key,old['invoice_id'],old['issued'],old['price'],item['invoice_id'],item['issued'],item['price']],ensure_ascii=False).encode()).hexdigest()
+            fingerprint = hashlib.sha256(json.dumps([key,old['identity'],old['invoice_id'],old['issued'],old['price'],item['identity'],item['invoice_id'],item['issued'],item['price']],ensure_ascii=False).encode()).hexdigest()
             alerts.append(dict(item, fingerprint=fingerprint, approved=fingerprint in reviews, old_price=old['price'], change=round((item['price'] / old['price'] - 1) * 100, 2)))
         previous[key] = item
     for f in firms:
@@ -110,16 +113,40 @@ def audit(db, entity, record_id, before):
     db.execute("INSERT INTO edits(entity,record_id,changed_on,before_json) VALUES(?,?,?,?)", (entity,record_id,datetime.now(ZoneInfo("Europe/Istanbul")).isoformat(),json.dumps(before,ensure_ascii=False)))
 
 
-def delete_firm(record_id):
+def delete_record(entity, record_id, expected=None):
+    tables = {'firm': 'firms', 'invoice': 'invoices', 'payment': 'payments'}
+    if entity not in tables:
+        raise ValueError('Geçersiz kayıt türü.')
     with connect() as db:
         db.execute('BEGIN IMMEDIATE')
-        old = db.execute('SELECT * FROM firms WHERE id=?', (record_id,)).fetchone()
+        old = db.execute(f'SELECT * FROM {tables[entity]} WHERE id=?', (record_id,)).fetchone()
         if not old:
-            raise ValueError('Firma bulunamadı.')
-        if db.execute('SELECT 1 FROM invoices WHERE firm_id=? LIMIT 1', (record_id,)).fetchone():
-            raise ValueError('Bu firmaya ait fatura kayıtları var. Ödenmiş faturalar dahil kayıtları korumak için firma silinemez. Firma adını Düzelt ile değiştirebilirsiniz.')
-        audit(db, 'firm_deleted', record_id, dict(old))
-        db.execute('DELETE FROM firms WHERE id=?', (record_id,))
+            raise ValueError('Kayıt bulunamadı. Listeyi yenileyin.')
+        invoices = []
+        if entity == 'firm':
+            invoices = [dict(r) for r in db.execute('SELECT * FROM invoices WHERE firm_id=?',(record_id,))]
+        elif entity == 'invoice':
+            invoices = [dict(old)]
+        payments, items = [], []
+        for invoice in invoices:
+            payments.extend(dict(r) for r in db.execute('SELECT * FROM payments WHERE invoice_id=?',(invoice['id'],)))
+            items.extend(dict(r) for r in db.execute('SELECT * FROM items WHERE invoice_id=?',(invoice['id'],)))
+        counts = {'invoices':len(invoices),'payments':len(payments),'items':len(items)}
+        if entity != 'payment' and expected != counts:
+            raise ValueError('Bağlı kayıtlar değişmiş veya silme onayı eksik. Listeyi yenileyip silme işlemini tekrar onaylayın.')
+        audit(db,entity+'_deleted',record_id,dict(record=dict(old),invoices=invoices,payments=payments,items=items))
+        for invoice in invoices:
+            db.execute('DELETE FROM payments WHERE invoice_id=?',(invoice['id'],))
+            db.execute('DELETE FROM items WHERE invoice_id=?',(invoice['id'],))
+            db.execute('DELETE FROM invoices WHERE id=?',(invoice['id'],))
+        if entity != 'invoice':
+            db.execute(f'DELETE FROM {tables[entity]} WHERE id=?',(record_id,))
+
+
+
+def delete_firm(record_id):
+    # Compatibility helper for callers deleting an empty firm.
+    delete_record('firm',record_id,dict(invoices=0,payments=0,items=0))
 
 
 def create_invoice(data, record_id=None):
@@ -142,6 +169,7 @@ def create_invoice(data, record_id=None):
         if record_id is None:
             cur = db.execute('INSERT INTO invoices(firm_id,number,issued,due,total,photo) VALUES(?,?,?,?,?,?)', values)
             record_id = cur.lastrowid
+            db.execute("UPDATE invoices SET identity=lower(hex(randomblob(16))) WHERE id=?",(record_id,))
         else:
             old = db.execute('SELECT * FROM invoices WHERE id=?',(record_id,)).fetchone()
             if not old:
@@ -232,7 +260,11 @@ class Handler(BaseHTTPRequestHandler):
             elif self.path == '/api/payments/edit':
                 create_payment(data, int(data['id']))
             elif self.path == '/api/firms/delete':
-                delete_firm(int(data['id']))
+                delete_record('firm',int(data['id']),data.get('expected'))
+            elif self.path == '/api/invoices/delete':
+                delete_record('invoice',int(data['id']),data.get('expected'))
+            elif self.path == '/api/payments/delete':
+                delete_record('payment',int(data['id']))
             elif self.path == '/api/firms/edit':
                 with connect() as db:
                     db.execute('BEGIN IMMEDIATE')
