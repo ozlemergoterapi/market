@@ -42,3 +42,33 @@ Toplam İskonto (%5,78) 739,73 TL
 
     def test_invalid_date_is_left_blank(self):
         self.assertEqual(parse_invoice('Fatura Tarihi: 31.02.2026')['issued'],'')
+
+    def test_separate_labels_and_values_with_ocr_noise(self):
+        draft=parse_invoice("""KOSEOĞLU GİDA VE MEŞRUBAT PAZ LTD.ŞTİ >. = b4
+Belge No:
+E10 2026 000001584
+Fatura Tarihi:
+22 - 10 - 2026
+Ödenecek Tutar:
+12.189, 73 TL""",[dict(id=4,name='Köseoğlu Eti Bisküvi')])
+        self.assertEqual(draft['firm_id'],4)
+        self.assertEqual(draft['number'],'E102026000001584')
+        self.assertEqual(draft['issued'],'2026-10-22')
+        self.assertEqual(draft['total'],'12189.73')
+        self.assertIn('12.189,73',draft['sources']['total'])
+
+    def test_does_not_take_discount_or_tax_as_missing_total(self):
+        draft=parse_invoice('Ödenecek Tutar:\nToplam İskonto 739,73 TL\nKDV 120,69 TL')
+        self.assertEqual(draft['total'],'')
+
+    def test_conflicting_totals_and_firms_stay_unselected(self):
+        draft=parse_invoice('KOSEOGLU GIDA LTD\nÖdenecek Tutar 100,00 TL\nÖdenecek Tutar 200,00 TL',
+                            [dict(id=1,name='Köseoğlu Eti'),dict(id=2,name='Köseoğlu Toptan')])
+        self.assertEqual(draft['total'],'')
+        self.assertIsNone(draft['firm_id'])
+
+    def test_no_number_digits_are_invented(self):
+        self.assertEqual(parse_invoice('Belge No: E10202600001584')['number'],'')
+
+    def test_damaged_decimal_is_not_treated_as_smaller_total(self):
+        self.assertEqual(parse_invoice('Ödenecek Tutar: 12.189,7B TL')['total'],'')

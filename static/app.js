@@ -58,6 +58,7 @@ $('#new-invoice').onclick=()=>{
   if(!state)return;
   if(!state.firms.length){toast('Önce faturanın ait olduğu firmayı ekleyin.');$('[data-tab="firms"]').click();$('#new-firm').click();return;}
   ocrGeneration++;setMode('invoice',null);$('#invoice-form').reset();$('#invoice-form .form-error').textContent='';selectedPhoto=null;selectedPhotos=[];
+  [...$('#invoice-form').elements].forEach(e=>{delete e.dataset.userEdited;e.title='';});
   renderSelectedPhotos();$('#ocr-text').hidden=true;$('#ocr-review').hidden=true;$('#ocr-status').textContent='Fotoğraf isteğe bağlıdır. Okunan yazılar otomatik kaydedilmez.';
   $('#item-rows').innerHTML='';$('#due-preview').value='';
   $('#firm-select').innerHTML=state.firms.map(f=>`<option value="${f.id}">${esc(f.name)}</option>`).join('');
@@ -127,12 +128,14 @@ $('#read-photo').onclick=async()=>{
     if(generation!==ocrGeneration||selectedPhoto!==requestedPhoto||!$('#invoice-dialog').open)return;
     const draft=result.draft;
     $('#ocr-text').value=result.text;$('#ocr-text').hidden=false;
-    form.elements.number.value=draft.number||'';
-    form.elements.issued.value=draft.issued||'';
-    form.elements.total.value=draft.total||'';
-    form.elements.firm_id.value=draft.firm_id||'';
+    for(const key of ['number','issued','total']){
+      if(draft[key])form.elements[key].value=draft[key];
+      else if(key==='issued'&&!form.dataset.editId&&!form.elements.issued.dataset.userEdited)form.elements.issued.value='';
+      form.elements[key].title=draft.sources?.[key]?'Fotoğraftaki kaynak: '+draft.sources[key]:'Fotoğraftan okunamadı; alanı kontrol edin.';
+    }
+    if(draft.firm_id)form.elements.firm_id.value=draft.firm_id;
     $('#due-preview').value='';updateDue();
-    $('#item-rows').innerHTML='';
+    if(draft.items.length)$('#item-rows').innerHTML='';
     draft.items.forEach(item=>{
       $('#add-item').click();const row=$('#item-rows').lastElementChild;
       row.querySelector('.product').value=item.product;
@@ -239,3 +242,5 @@ document.addEventListener('click',async e=>{
   try{await api(path,data);await refresh();toast('Kayıt silindi; ödeme ve cari toplamları güncellendi.');}
   catch(error){toast(error.message);button.disabled=false;}
 });
+
+$('#invoice-form').addEventListener('input',event=>{event.target.dataset.userEdited='1';});

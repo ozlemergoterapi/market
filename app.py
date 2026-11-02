@@ -310,18 +310,28 @@ class Handler(BaseHTTPRequestHandler):
                     raise ValueError('Fotoğraf verisi geçersiz.')
                 languages = subprocess.run(['tesseract','--list-langs'],capture_output=True,text=True,check=True).stdout
                 lang = 'tur+eng' if 'tur' in languages.split() else 'eng'
-                texts = []
-                for pic in photos:
-                    with tempfile.NamedTemporaryFile(suffix='.img') as f:
-                        f.write(base64.b64decode(pic.split(',',1)[1])); f.flush()
-                        result = subprocess.run(['tesseract',f.name,'stdout','-l',lang,'--psm','6'],capture_output=True,text=True,timeout=45)
-                        if result.returncode:
-                            raise ValueError('Bir fotoğraf okunamadı. Daha net JPEG veya PNG deneyin.')
-                        texts.append(result.stdout)
-                text = '\n'.join(texts)
                 with connect() as db:
                     firms = [dict(r) for r in db.execute('SELECT id,name FROM firms')]
-                return self.respond({'text':text,'language':lang,'draft':parse_invoice(text,firms)})
+                def read_pages(mode):
+                    texts = []
+                    for pic in photos:
+                        with tempfile.NamedTemporaryFile(suffix='.img') as f:
+                            f.write(base64.b64decode(pic.split(',',1)[1])); f.flush()
+                            read = subprocess.run(['tesseract',f.name,'stdout','-l',lang,'--psm',str(mode)],capture_output=True,text=True,timeout=45)
+                            if read.returncode:
+                                raise ValueError('Bir fotoğraf okunamadı. Daha net JPEG veya PNG deneyin.')
+                            texts.append(read.stdout)
+                    return '\n'.join(texts)
+                text = read_pages(6)
+                draft = parse_invoice(text,firms)
+                if not all(draft[k] for k in ('number','issued','total')) or not draft['items']:
+                    alternative_text = read_pages(3)
+                    alternative = parse_invoice(alternative_text,firms)
+                    def score(value):
+                        return 10*sum(bool(value[k]) for k in ('number','issued','total'))+min(len(value['items']),8)
+                    if score(alternative)>score(draft):
+                        text,draft = alternative_text,alternative
+                return self.respond({'text':text,'language':lang,'draft':draft})
             else:
                 return self.respond({'error':'Bulunamadı.'},404)
             self.respond({'ok':True},201)
