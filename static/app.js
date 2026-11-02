@@ -1,7 +1,8 @@
-let state, selectedPhoto = null, photoLoading = false;
+let state, selectedPhoto = null, selectedPhotos = [], photoLoading = false;
 const $ = s => document.querySelector(s);
 const esc = x => String(x ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const currency = cents => new Intl.NumberFormat('tr-TR',{style:'currency',currency:'TRY'}).format(cents/100);
+const unitCurrency = cents => new Intl.NumberFormat('tr-TR',{style:'currency',currency:'TRY',minimumFractionDigits:2,maximumFractionDigits:4}).format(cents/100);
 const niceDate = s => new Date(s+'T12:00:00').toLocaleDateString('tr-TR',{day:'numeric',month:'short',year:'numeric'});
 async function api(path, data) {
   const r = await fetch('/api/'+path,data===undefined?{}:{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});
@@ -40,7 +41,7 @@ function render(){
   const search=$('#search').value.toLocaleLowerCase('tr');
   $('#invoice-list').innerHTML=invoiceTable(state.invoices.filter(i=>(i.firm+' '+i.number).toLocaleLowerCase('tr').includes(search)));
   $('#firm-list').innerHTML=state.firms.length?state.firms.map(f=>`<article class="firm-card"><h2>${esc(f.name)}</h2><p>Kalan cari borç</p><strong>${currency(f.balance)}</strong><p><button data-edit-firm="${f.id}">Düzelt</button> <button data-delete-firm="${f.id}" class="delete-button">Sil</button></p></article>`).join(''):empty('İlk firmanızı ekleyin.','Faturalarını takip edeceğiniz tedarikçilerinizi buradan kaydedin.');
-  $('#price-list').innerHTML=state.alerts.length?table(['Ürün / Firma','Önceki fiyat','Yeni fiyat','Değişim','Onay'],state.alerts.map(a=>`<tr><td><strong>${esc(a.product)}</strong><small>${esc(a.unit)} · ${esc(a.firm)} · ${niceDate(a.issued)} · ${esc(a.number)}</small></td><td>${currency(a.old_price)}</td><td>${currency(a.price)}</td><td><span class="badge ${a.change>0?'late':''}">${a.change>0?'↑':'↓'} %${Math.abs(a.change).toLocaleString('tr-TR')}</span></td><td>${a.approved?'<span class="badge">Onaylandı</span>':`<button data-approve="${a.fingerprint}" class="primary">Değişimi onayla</button> <button data-edit-invoice="${a.invoice_id}">Faturayı düzelt</button>`}</td></tr>`)):empty('Henüz fiyat değişimi yok.','Aynı firmanın aynı ürün ve ambalajını iki faturada kaydettiğinizde değişim burada görünür.');
+  $('#price-list').innerHTML=state.alerts.length?table(['Ürün / Firma','Önceki fiyat','Yeni fiyat','Değişim','Onay'],state.alerts.map(a=>`<tr><td><strong>${esc(a.product)}</strong><small>${esc(a.unit)} · ${esc(a.firm)} · ${niceDate(a.issued)} · ${esc(a.number)}</small></td><td>${unitCurrency(a.old_price)}</td><td>${unitCurrency(a.price)}</td><td><span class="badge ${a.change>0?'late':''}">${a.change>0?'↑':'↓'} %${Math.abs(a.change).toLocaleString('tr-TR')}</span></td><td>${a.approved?'<span class="badge">Onaylandı</span>':`<button data-approve="${a.fingerprint}" class="primary">Değişimi onayla</button> <button data-edit-invoice="${a.invoice_id}">Faturayı düzelt</button>`}</td></tr>`)):empty('Henüz fiyat değişimi yok.','Aynı firmanın aynı ürün ve ambalajını iki faturada kaydettiğinizde değişim burada görünür.');
   $('#payment-list').innerHTML=state.payments.length?table(['Firma / Fatura','Ödeme tarihi','Ödenen',''],state.payments.map(p=>{const i=state.invoices.find(i=>i.id===p.invoice_id);return `<tr><td>${esc(i.firm)}<small>${esc(i.number)}</small></td><td>${niceDate(p.paid_on)}</td><td>${currency(p.amount)}</td><td><button data-edit-payment="${p.id}">Düzelt</button> <button data-delete-payment="${p.id}" class="delete-button">Sil</button></td></tr>`;})):empty('Henüz ödeme kaydı yok.','Fatura satırındaki “Ödeme kaydet” düğmesini kullanın.');
 }
 async function refresh(){state=await api('state');render();}
@@ -56,8 +57,8 @@ $('#new-firm').onclick=()=>{setMode('firm',null);$('#firm-form').reset();$('#fir
 $('#new-invoice').onclick=()=>{
   if(!state)return;
   if(!state.firms.length){toast('Önce faturanın ait olduğu firmayı ekleyin.');$('[data-tab="firms"]').click();$('#new-firm').click();return;}
-  setMode('invoice',null);$('#invoice-form').reset();$('#invoice-form .form-error').textContent='';selectedPhoto=null;
-  $('#photo-preview').hidden=true;$('#ocr-text').hidden=true;$('#ocr-status').textContent='Fotoğraf isteğe bağlıdır. Okunan yazılar otomatik kaydedilmez.';
+  ocrGeneration++;setMode('invoice',null);$('#invoice-form').reset();$('#invoice-form .form-error').textContent='';selectedPhoto=null;selectedPhotos=[];
+  $('#photo-preview').hidden=true;$('#ocr-text').hidden=true;$('#ocr-review').hidden=true;$('#ocr-status').textContent='Fotoğraf isteğe bağlıdır. Okunan yazılar otomatik kaydedilmez.';
   $('#item-rows').innerHTML='';$('#due-preview').value='';
   $('#firm-select').innerHTML=state.firms.map(f=>`<option value="${f.id}">${esc(f.name)}</option>`).join('');
   $('#invoice-form [name=issued]').value=state.today;$('#invoice-dialog').showModal();
@@ -67,33 +68,66 @@ $('#invoice-form [name=issued]').oninput=updateDue;$('#invoice-form [name=days]'
 $('#due-preview').oninput=()=>{const issued=$('#invoice-form [name=issued]').value,due=$('#due-preview').value;if(issued&&due)$('#invoice-form [name=days]').value=Math.round((new Date(due)-new Date(issued))/86400000);};
 $('#add-item').onclick=()=>{
   const row=document.createElement('div');row.className='item-row';
-  row.innerHTML='<input class="product" aria-label="Ürün adı" placeholder="Marka ve ürün adı" required maxlength="200" list="products"><input class="unit" aria-label="Ambalaj ve fiyat birimi" placeholder="1 litre / adet" required maxlength="200"><input class="price" aria-label="Son birim fiyat TL" type="number" step="0.01" min="0.01" placeholder="Fiyat TL" required><button type="button" aria-label="Ürün satırını sil">Sil</button>';
+  row.innerHTML='<input class="product" aria-label="Ürün adı" placeholder="Marka ve ürün adı" required maxlength="200" list="products"><input class="unit" aria-label="Ambalaj ve fiyat birimi" placeholder="1 litre / adet" required maxlength="200"><input class="price" aria-label="Son birim fiyat TL" type="number" step="0.0001" min="0.0001" placeholder="Son fiyat TL" required><button type="button" aria-label="Ürün satırını sil">Sil</button>';
   row.querySelector('button').onclick=()=>row.remove();$('#item-rows').append(row);
 };
 $('#photo').onchange=async e=>{
-  selectedPhoto=null;$('#photo-preview').hidden=true;$('#ocr-text').hidden=true;
-  const file=e.target.files[0];if(!file)return;
-  if(file.size>8*1024*1024||!['image/jpeg','image/png','image/webp'].includes(file.type)){e.target.value='';$('#ocr-status').textContent='En fazla 8 MB JPEG, PNG veya WebP seçin.';return;}
+  ocrGeneration++;
+  selectedPhoto=null;selectedPhotos=[];$('#photo-preview').hidden=true;$('#ocr-text').hidden=true;
+  const files=[...e.target.files];if(!files.length)return;
+  if(files.length>6||files.reduce((sum,f)=>sum+f.size,0)>8*1024*1024||files.some(f=>!['image/jpeg','image/png','image/webp'].includes(f.type))){e.target.value='';$('#ocr-status').textContent='En fazla 6 JPEG, PNG veya WebP seçin; toplam boyut 8 MB altında olmalı.';return;}
   photoLoading=true;
-  try{selectedPhoto=await new Promise((resolve,reject)=>{const r=new FileReader();r.onload=()=>resolve(r.result);r.onerror=reject;r.readAsDataURL(file);});$('#photo-preview').src=selectedPhoto;$('#photo-preview').hidden=false;}catch{$('#ocr-status').textContent='Fotoğraf yüklenemedi.';}finally{photoLoading=false;}
+  try{
+    selectedPhotos=await Promise.all(files.map(file=>new Promise((resolve,reject)=>{const r=new FileReader();r.onload=()=>resolve(r.result);r.onerror=reject;r.readAsDataURL(file);})));selectedPhoto=selectedPhotos[0];$('#photo-preview').src=selectedPhoto;$('#photo-preview').hidden=false;$('#ocr-status').textContent=files.length+' fotoğraf seçildi. Tüm sayfaları birlikte okutabilirsiniz.';
+  }catch{$('#ocr-status').textContent='Fotoğraf yüklenemedi.';}finally{photoLoading=false;}
+
 };
+let ocrGeneration=0;
 $('#read-photo').onclick=async()=>{
   if(!selectedPhoto){$('#ocr-status').textContent='Önce bir fotoğraf seçin.';return;}
-  $('#read-photo').disabled=true;$('#ocr-status').textContent='Fotoğraf okunuyor…';
-  try{const result=await api('ocr',{photo:selectedPhoto});$('#ocr-text').value=result.text;$('#ocr-text').hidden=false;$('#ocr-status').textContent='Okunan yazıları kontrol ederek aşağıdaki alanlara girin. Ürün satırları otomatik ayrıştırılmaz.';}
-  catch(e){$('#ocr-status').textContent=e.message;}finally{$('#read-photo').disabled=false;}
+  const form=$('#invoice-form');
+  if((form.elements.number.value||form.elements.total.value||$('#item-rows').children.length)&&!window.confirm('Fotoğraftan okunan bilgiler bu formdaki tarih, numara, toplam, firma ve ürünlerin yerine yazılacak. Kaydettiğiniz kayıt değişmez; önce kontrol edeceksiniz. Devam edilsin mi?'))return;
+  const generation=++ocrGeneration, requestedPhoto=selectedPhoto;
+  $('#read-photo').disabled=true;$('#ocr-status').textContent='Fotoğraf okunuyor ve fatura alanları hazırlanıyor…';
+  form.querySelector('button.primary').disabled=true;
+  try{
+    const result=await api('ocr',{photos:selectedPhotos.length?selectedPhotos:[requestedPhoto]});
+    if(generation!==ocrGeneration||selectedPhoto!==requestedPhoto||!$('#invoice-dialog').open)return;
+    const draft=result.draft;
+    $('#ocr-text').value=result.text;$('#ocr-text').hidden=false;
+    form.elements.number.value=draft.number||'';
+    form.elements.issued.value=draft.issued||'';
+    form.elements.total.value=draft.total||'';
+    form.elements.firm_id.value=draft.firm_id||'';
+    $('#due-preview').value='';updateDue();
+    $('#item-rows').innerHTML='';
+    draft.items.forEach(item=>{
+      $('#add-item').click();const row=$('#item-rows').lastElementChild;
+      row.querySelector('.product').value=item.product;
+      row.querySelector('.unit').value=item.unit;
+      row.querySelector('.price').value=item.price;
+      const evidence=document.createElement('small');evidence.className='item-evidence';evidence.textContent=`Kod: ${item.code} · Miktar: ${item.quantity} · Satır: ${item.net} + KDV ${item.vat} TL`;row.append(evidence);
+      row.title=`Ürün kodu: ${item.code} · Miktar: ${item.quantity} · Faturadaki birim fiyat: ${item.source_price} · KDV hariç satır: ${item.net} · KDV: ${item.vat}`;
+    });
+    $('.confirm input').checked=false;
+    $('#ocr-review').hidden=false;
+    $('#ocr-review').textContent=(draft.supplier?'Okunan firma: '+draft.supplier+'\n':'')+draft.warnings.join('\n');
+    $('#ocr-status').textContent=`${draft.items.length} ürün satırı ve okunabilen fatura alanları dolduruldu. Henüz kaydedilmedi. Tüm sayfaların eksiksiz okunduğunu kontrol edin; boş alanları tamamlayın. Birim fiyatlar satır tutarı + KDV üzerinden hesaplandı.`;
+  }catch(e){$('#ocr-status').textContent=e.message;}
+  finally{$('#read-photo').disabled=false;form.querySelector('button.primary').disabled=false;}
 };
+
 document.addEventListener('click',async e=>{
   const pay=e.target.closest('[data-pay]'),photo=e.target.closest('[data-photo]');
   if(pay){setMode('payment',null);const i=state.invoices.find(i=>i.id===Number(pay.dataset.pay));const f=$('#payment-form');f.reset();f.querySelector('.form-error').textContent='';paymentOptions(f);f.elements.invoice_id.value=i.id;f.elements.amount.value=(i.remaining/100).toFixed(2);f.elements.amount.max=(i.remaining/100).toFixed(2);f.elements.paid_on.value=state.today;f.elements.paid_on.max=state.today;$('#payment-description').textContent=`${i.firm} · ${i.number} · Kalan ${currency(i.remaining)}`;$('#payment-dialog').showModal();}
-  if(photo){try{const r=await api('photo/'+photo.dataset.photo);$('#saved-photo').src=r.photo;$('#photo-dialog').showModal();}catch(e){toast(e.message);}}
+  if(photo){try{const r=await api('photo/'+photo.dataset.photo);$('#photo-pages').innerHTML=(r.photos||[r.photo]).map((p,index)=>`<p>Sayfa ${index+1}</p><img src="${esc(p)}" alt="Fatura sayfa ${index+1}" style="max-width:100%">`).join('');$('#photo-dialog').showModal();}catch(e){toast(e.message);}}
 });
 for(const [id,path] of [['firm','firms'],['invoice','invoices'],['payment','payments']]){
   $('#'+id+'-form').onsubmit=async e=>{
     e.preventDefault();const form=e.target,button=form.querySelector('button.primary'),error=form.querySelector('.form-error');error.textContent='';
-    if(photoLoading&&id==='invoice'){error.textContent='Fotoğrafın yüklenmesini bekleyin.';return;}
+    if((photoLoading||$('#read-photo').disabled)&&id==='invoice'){error.textContent='Fotoğrafın yüklenmesini bekleyin.';return;}
     const data=Object.fromEntries(new FormData(form));
-    if(id==='invoice'){data.photo=selectedPhoto;data.items=[...document.querySelectorAll('.item-row')].map(r=>({product:r.querySelector('.product').value,unit:r.querySelector('.unit').value,price:r.querySelector('.price').value}));}
+    if(id==='invoice'){data.photo=selectedPhotos.length?null:selectedPhoto;data.photos=selectedPhotos;data.items=[...document.querySelectorAll('.item-row')].map(r=>({product:r.querySelector('.product').value,unit:r.querySelector('.unit').value,price:r.querySelector('.price').value}));}
     const editing=form.dataset.editId;
     if(editing)data.id=Number(editing);
     button.disabled=true;
@@ -122,10 +156,10 @@ document.addEventListener('click',async e=>{
   if(invoice){
     const i=state.invoices.find(i=>i.id===Number(invoice.dataset.editInvoice));$('#new-invoice').click();setMode('invoice',i.id);
     const form=$('#invoice-form');form.elements.firm_id.value=i.firm_id;form.elements.number.value=i.number;form.elements.issued.value=i.issued;form.elements.days.value=Math.round((new Date(i.due)-new Date(i.issued))/86400000);form.elements.total.value=(i.total/100).toFixed(2);updateDue();
-    state.items.filter(t=>t.invoice_id===i.id).forEach(t=>{$('#add-item').click();const row=$('#item-rows').lastElementChild;row.querySelector('.product').value=t.product;row.querySelector('.unit').value=t.unit;row.querySelector('.price').value=(t.price/100).toFixed(2);});
+    state.items.filter(t=>t.invoice_id===i.id).forEach(t=>{$('#add-item').click();const row=$('#item-rows').lastElementChild;row.querySelector('.product').value=t.product;row.querySelector('.unit').value=t.unit;row.querySelector('.price').value=t.unit_price||(t.price/100).toFixed(4);});
     if(i.has_photo){
       photoLoading=true;form.querySelector('button.primary').disabled=true;
-      try{const r=await api('photo/'+i.id);selectedPhoto=r.photo;$('#photo-preview').src=r.photo;$('#photo-preview').hidden=false;}
+      try{const r=await api('photo/'+i.id);selectedPhoto=r.photo;selectedPhotos=r.photos||[r.photo];$('#photo-preview').src=r.photo;$('#photo-preview').hidden=false;}
       catch(error){form.closest('dialog').close();toast('Fotoğraf yüklenemedi. Kaydı yeniden açın.');}
       finally{photoLoading=false;form.querySelector('button.primary').disabled=false;}
     }

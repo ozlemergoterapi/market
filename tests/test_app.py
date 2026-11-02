@@ -98,6 +98,14 @@ class LedgerTests(unittest.TestCase):
         self.assertEqual(value['invoices'],[])
         self.assertEqual(value['payments'],[])
 
+    def test_four_decimal_unit_price_is_retained(self):
+        self.invoice(items=[dict(product='Süt',unit='adet',price='26.3789')])
+        value=app.state()['items'][0]
+        self.assertEqual(value['unit_price'],'26.3789')
+        self.assertAlmostEqual(value['price'],2637.89)
+        self.invoice(number='F002',issued='2026-02-01',items=[dict(product='Süt',unit='adet',price='26.3790')])
+        self.assertEqual(len(app.state()['alerts']),1)
+
     def test_duplicate_invoice_rolls_back(self):
         self.invoice()
         with self.assertRaises(app.sqlite3.IntegrityError):

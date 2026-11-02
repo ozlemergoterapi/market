@@ -20,7 +20,7 @@ Telefon üzerinden gerçek kullanım için kimlik doğrulama ve HTTPS ile yayın
 1. Firmalar bölümünde tedarikçiyi kaydedin.
 2. Fatura ekle ile firma, benzersiz fatura numarası, tarih ve toplamı girin.
 3. Her faturaya özel vade gününü veya ödeme tarihini girin. Vade fatura tarihinden hesaplanır; günler takvim günüdür, hafta sonu kaydırılmaz.
-4. İsterseniz fotoğraf yükleyin ve yazı okuma düğmesini kullanın. OCR metni yardımcıdır: alanlara elle aktarılır, ürün satırları otomatik ayrıştırılmaz. Bilgileri kontrol edip onaylayın.
+4. İsterseniz fotoğraf yükleyin ve yazı okuma düğmesini kullanın. Fotoğrafı oku ve alanları doldur düğmesi, okunabilen tarih, numara, ödenecek toplam, mevcut firma eşleşmesi ve ürün satırlarını taslak olarak doldurur. Vade elle girilir. Bilgileri kontrol edip onaylayın.
 5. Fiyat takibi için aynı marka/ürün adı ve ambalaj/fiyat birimini kullanın. KDV ve iskonto sonrası birim fiyatı girin. Karşılaştırma aynı firma içinde yapılır; farklı adlar ve birimler otomatik eşleştirilmez.
 6. Fatura üzerinden tam veya kısmi ödeme kaydedin. Ödeme ilgili faturadan düşer; fazla ödeme kabul edilmez.
 
@@ -30,7 +30,9 @@ Günlük özet İstanbul tarihini kullanır. Gelecek 7 gün yarın başlar. Geci
 
 Tesseract komutu PATH üzerinde olmalıdır. Türkçe için `tur` dil verisi önerilir; yoksa İngilizce motor kullanılır ve Türkçe harflerde doğruluk düşer. Debian/Ubuntu üzerinde sistem paketleri: `tesseract-ocr`, `tesseract-ocr-tur`. Motor yoksa elle kayıt kullanılabilir.
 
-Fotoğraflar dış servise gönderilmez. JPEG, PNG, WebP ve en fazla 8 MB desteklenir.
+Fotoğraflar dış servise gönderilmez. En fazla 6 JPEG/PNG/WebP sayfa, toplam 8 MB desteklenir.
+
+Çevrimdışı ayrıştırıcı Türkçe etiketli (Fatura Tarihi, Belge/Fatura No, Ödenecek Tutar) alanları ve sıra no, ürün kodu, ürün adı, miktar, birim, birim fiyat, KDV oranı, KDV tutarı, satır net tutarı sırasındaki tabloları destekler. Farklı düzenler ve bulanık fotoğraflar eksik ayrıştırılabilir; eksikler ve toplam uyuşmazlığı ekranda belirtilir. Birim fiyat (satır neti + satır KDV) / miktar olarak dört ondalıkla hesaplanır; bu, satır tutarına yansıtılmış iskontoyu ikinci kez düşmez. Sonradan ayrıca uygulanan indirim/masraf varsa elle kontrol gerekir. Sayfaların tamamı birlikte seçilmelidir. Örtüşen aynı numaralı satırlar tekilleştirilir. Kayıtlar yalnızca kullanıcı kontrol kutusuyla onaylayıp kaydettiğinde oluşturulur. Mevcut kayıt okunarak açılırsa otomatik doldurma öncesi değiştirme onayı istenir.
 
 ## Veri ve yedekleme
 

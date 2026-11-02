@@ -8,10 +8,11 @@ import sqlite3
 import subprocess
 import tempfile
 from datetime import date, datetime, timedelta
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from zoneinfo import ZoneInfo
+from invoice_parser import parse_invoice
 
 ROOT = Path(__file__).resolve().parent
 DB = Path(os.environ.get('MARKET_DB', str(ROOT / 'data/market.sqlite3')))
@@ -42,6 +43,11 @@ def init():
         if 'identity' not in {r[1] for r in db.execute('PRAGMA table_info(invoices)')}:
             db.execute("ALTER TABLE invoices ADD COLUMN identity TEXT NOT NULL DEFAULT ''")
         db.execute("UPDATE invoices SET identity=lower(hex(randomblob(16))) WHERE identity=''")
+        if 'extra_photos' not in {r[1] for r in db.execute('PRAGMA table_info(invoices)')}:
+            db.execute("ALTER TABLE invoices ADD COLUMN extra_photos TEXT NOT NULL DEFAULT '[]'")
+        if 'unit_price' not in {r[1] for r in db.execute('PRAGMA table_info(items)')}:
+            db.execute("ALTER TABLE items ADD COLUMN unit_price TEXT NOT NULL DEFAULT ''")
+        db.execute("UPDATE items SET unit_price=printf('%.4f',price/100.0) WHERE unit_price=''")
 
 
 def money(value):
@@ -84,6 +90,8 @@ def state(today=None):
         reviews = {r['fingerprint'] for r in db.execute('SELECT fingerprint FROM price_reviews')}
         items = [dict(r) for r in db.execute('''SELECT t.*,i.firm_id,i.issued,i.number,i.identity,f.name AS firm FROM items t
           JOIN invoices i ON i.id=t.invoice_id JOIN firms f ON f.id=i.firm_id ORDER BY i.issued,i.id,t.id''')]
+    for item in items:
+        item['price'] = float(Decimal(item['unit_price']) * 100)
     totals = dict(today=0, overdue=0, upcoming=0, total=0)
     for i in invoices:
         i['remaining'] = i['total'] - i['paid']
@@ -156,12 +164,25 @@ def create_invoice(data, record_id=None):
         raise ValueError('Vade 0 ile 3650 gün arasında olmalı.')
     total = money(data['total'])
     number = clean(data['number'], 'Fatura numarası')
-    pic = photo(data.get('photo'))
+    photos = data.get('photos') or ([data['photo']] if data.get('photo') else [])
+    if not isinstance(photos,list) or len(photos)>6:
+        raise ValueError('En fazla 6 fotoğraf seçin.')
+    photos = [photo(p) for p in photos]
+    pic = photos[0] if photos else None
     items = data.get('items', [])
     if not isinstance(items, list) or len(items) > 500:
         raise ValueError('Ürün listesi geçersiz.')
-    rows = [(clean(t['product'], 'Ürün'), clean(t['unit'], 'Ambalaj / fiyat birimi'), money(t['price'])) for t in items]
-    if len({(p.casefold(), u.casefold()) for p,u,_ in rows}) != len(rows):
+    rows = []
+    for t in items:
+        try:
+            value = Decimal(str(t['price']))
+            if not value.is_finite() or value <= 0 or value > 999999999 or value != value.quantize(Decimal('.0001')):
+                raise ValueError('Birim fiyat sıfırdan büyük ve en fazla dört ondalık basamaklı olmalı.')
+        except InvalidOperation:
+            raise ValueError('Birim fiyat geçersiz.')
+        cents = max(1, int((value * 100).quantize(Decimal('1'), rounding=ROUND_HALF_UP)))
+        rows.append((clean(t['product'], 'Ürün'), clean(t['unit'], 'Ambalaj / fiyat birimi'), cents, str(value)))
+    if len({(p.casefold(), u.casefold()) for p,u,_,_ in rows}) != len(rows):
         raise ValueError('Aynı ürün ve birimi faturada bir kez girin.')
     with connect() as db:
         db.execute('BEGIN IMMEDIATE')
@@ -182,7 +203,8 @@ def create_invoice(data, record_id=None):
             audit(db,'invoice',record_id,before)
             db.execute('UPDATE invoices SET firm_id=?,number=?,issued=?,due=?,total=?,photo=? WHERE id=?', (*values,record_id))
             db.execute('DELETE FROM items WHERE invoice_id=?',(record_id,))
-        db.executemany('INSERT INTO items(invoice_id,product,unit,price) VALUES(?,?,?,?)', [(record_id,*r) for r in rows])
+        db.execute('UPDATE invoices SET extra_photos=? WHERE id=?',(json.dumps(photos[1:]),record_id))
+        db.executemany('INSERT INTO items(invoice_id,product,unit,price,unit_price) VALUES(?,?,?,?,?)', [(record_id,*r) for r in rows])
 
 
 def create_payment(data, record_id=None):
@@ -224,8 +246,8 @@ class Handler(BaseHTTPRequestHandler):
         if self.path.startswith('/api/photo/'):
             try:
                 with connect() as db:
-                    row = db.execute('SELECT photo FROM invoices WHERE id=?', (int(self.path.rsplit('/',1)[1]),)).fetchone()
-                return self.respond({'photo': row['photo'] if row else None})
+                    row = db.execute('SELECT photo,extra_photos FROM invoices WHERE id=?', (int(self.path.rsplit('/',1)[1]),)).fetchone()
+                return self.respond({'photo': row['photo'] if row else None,'photos':([row['photo']]+json.loads(row['extra_photos'])) if row and row['photo'] else []})
             except ValueError:
                 return self.respond({'error': 'Geçersiz kayıt.'}, 400)
         files = {'/': ('index.html','text/html'), '/app.js': ('app.js','text/javascript'), '/style.css': ('style.css','text/css'), '/logo.png': ('logo.png','image/png')}
@@ -280,17 +302,26 @@ class Handler(BaseHTTPRequestHandler):
                 with connect() as db:
                     db.execute('INSERT OR IGNORE INTO price_reviews VALUES(?,?)',(fingerprint,datetime.now(ZoneInfo('Europe/Istanbul')).isoformat()))
             elif self.path == '/api/ocr':
-                pic = photo(data.get('photo'))
-                if not pic:
-                    raise ValueError('Önce bir fotoğraf seçin.')
-                with tempfile.NamedTemporaryFile(suffix='.img') as f:
-                    f.write(base64.b64decode(pic.split(',',1)[1])); f.flush()
-                    languages = subprocess.run(['tesseract','--list-langs'],capture_output=True,text=True,check=True).stdout
-                    lang = 'tur+eng' if 'tur' in languages.split() else 'eng'
-                    result = subprocess.run(['tesseract',f.name,'stdout','-l',lang],capture_output=True,text=True,timeout=45)
-                    if result.returncode:
-                        raise ValueError('Fotoğraf okunamadı. Daha net bir JPEG veya PNG deneyin.')
-                return self.respond({'text':result.stdout,'language':lang})
+                photos = data.get('photos') or ([data['photo']] if data.get('photo') else [])
+                if not isinstance(photos,list) or not 1 <= len(photos) <= 6:
+                    raise ValueError('1 ile 6 arasında fotoğraf seçin.')
+                photos = [photo(p) for p in photos]
+                if not all(photos):
+                    raise ValueError('Fotoğraf verisi geçersiz.')
+                languages = subprocess.run(['tesseract','--list-langs'],capture_output=True,text=True,check=True).stdout
+                lang = 'tur+eng' if 'tur' in languages.split() else 'eng'
+                texts = []
+                for pic in photos:
+                    with tempfile.NamedTemporaryFile(suffix='.img') as f:
+                        f.write(base64.b64decode(pic.split(',',1)[1])); f.flush()
+                        result = subprocess.run(['tesseract',f.name,'stdout','-l',lang,'--psm','6'],capture_output=True,text=True,timeout=45)
+                        if result.returncode:
+                            raise ValueError('Bir fotoğraf okunamadı. Daha net JPEG veya PNG deneyin.')
+                        texts.append(result.stdout)
+                text = '\n'.join(texts)
+                with connect() as db:
+                    firms = [dict(r) for r in db.execute('SELECT id,name FROM firms')]
+                return self.respond({'text':text,'language':lang,'draft':parse_invoice(text,firms)})
             else:
                 return self.respond({'error':'Bulunamadı.'},404)
             self.respond({'ok':True},201)
