@@ -57,6 +57,20 @@ class LedgerTests(unittest.TestCase):
             self.invoice(days=-1)
         self.assertEqual(len(app.state()['invoices']),0)
 
+    def test_empty_firm_can_be_deleted(self):
+        app.delete_firm(1)
+        self.assertEqual(app.state()['firms'], [])
+        with self.assertRaises(ValueError):
+            app.delete_firm(1)
+
+    def test_firm_with_paid_invoice_cannot_be_deleted(self):
+        self.invoice()
+        app.create_payment(dict(invoice_id=1,amount='1000.50',paid_on='2026-01-21'))
+        with self.assertRaises(ValueError):
+            app.delete_firm(1)
+        self.assertEqual(len(app.state()['firms']),1)
+        self.assertEqual(len(app.state()['payments']),1)
+
     def test_duplicate_invoice_rolls_back(self):
         self.invoice()
         with self.assertRaises(app.sqlite3.IntegrityError):

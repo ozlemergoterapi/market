@@ -39,7 +39,7 @@ function render(){
   dailySection.innerHTML=Object.keys(daily).length?`<div class="daily-totals">${Object.entries(daily).sort(([a],[b])=>a.localeCompare(b)).map(([d,total])=>`<div><small>${niceDate(d)}${d<state.today?' · Gecikti':''}</small><strong>${currency(total)}</strong></div>`).join('')}</div>`:'';
   const search=$('#search').value.toLocaleLowerCase('tr');
   $('#invoice-list').innerHTML=invoiceTable(state.invoices.filter(i=>(i.firm+' '+i.number).toLocaleLowerCase('tr').includes(search)));
-  $('#firm-list').innerHTML=state.firms.length?state.firms.map(f=>`<article class="firm-card"><h2>${esc(f.name)}</h2><p>Kalan cari borç</p><strong>${currency(f.balance)}</strong><p><button data-edit-firm="${f.id}">Düzelt</button></p></article>`).join(''):empty('İlk firmanızı ekleyin.','Faturalarını takip edeceğiniz tedarikçilerinizi buradan kaydedin.');
+  $('#firm-list').innerHTML=state.firms.length?state.firms.map(f=>`<article class="firm-card"><h2>${esc(f.name)}</h2><p>Kalan cari borç</p><strong>${currency(f.balance)}</strong><p><button data-edit-firm="${f.id}">Düzelt</button> <button data-delete-firm="${f.id}" class="delete-button">Sil</button></p></article>`).join(''):empty('İlk firmanızı ekleyin.','Faturalarını takip edeceğiniz tedarikçilerinizi buradan kaydedin.');
   $('#price-list').innerHTML=state.alerts.length?table(['Ürün / Firma','Önceki fiyat','Yeni fiyat','Değişim','Onay'],state.alerts.map(a=>`<tr><td><strong>${esc(a.product)}</strong><small>${esc(a.unit)} · ${esc(a.firm)} · ${niceDate(a.issued)} · ${esc(a.number)}</small></td><td>${currency(a.old_price)}</td><td>${currency(a.price)}</td><td><span class="badge ${a.change>0?'late':''}">${a.change>0?'↑':'↓'} %${Math.abs(a.change).toLocaleString('tr-TR')}</span></td><td>${a.approved?'<span class="badge">Onaylandı</span>':`<button data-approve="${a.fingerprint}" class="primary">Değişimi onayla</button> <button data-edit-invoice="${a.invoice_id}">Faturayı düzelt</button>`}</td></tr>`)):empty('Henüz fiyat değişimi yok.','Aynı firmanın aynı ürün ve ambalajını iki faturada kaydettiğinizde değişim burada görünür.');
   $('#payment-list').innerHTML=state.payments.length?table(['Firma / Fatura','Ödeme tarihi','Ödenen',''],state.payments.map(p=>{const i=state.invoices.find(i=>i.id===p.invoice_id);return `<tr><td>${esc(i.firm)}<small>${esc(i.number)}</small></td><td>${niceDate(p.paid_on)}</td><td>${currency(p.amount)}</td><td><button data-edit-payment="${p.id}">Düzelt</button></td></tr>`;})):empty('Henüz ödeme kaydı yok.','Fatura satırındaki “Ödeme kaydet” düğmesini kullanın.');
 }
@@ -145,3 +145,17 @@ $('#payment-form [name=invoice_id]').onchange=()=>{
   const old=state.payments.find(p=>p.id===Number(form.dataset.editId));
   form.elements.amount.max=((i.remaining+(old&&old.invoice_id===i.id?old.amount:0))/100).toFixed(2);
 };
+
+document.addEventListener('click',async e=>{
+  const button=e.target.closest('[data-delete-firm]');
+  if(!button)return;
+  const firm=state.firms.find(f=>f.id===Number(button.dataset.deleteFirm));
+  if(!firm)return;
+  if(state.invoices.some(i=>i.firm_id===firm.id)){
+    toast('Bu firmaya ait fatura kayıtları var. Kayıtları korumak için silinemez; firma adını Düzelt ile değiştirebilirsiniz.');return;
+  }
+  if(!window.confirm(firm.name+' firmasını silmek istediğinize emin misiniz?'))return;
+  button.disabled=true;
+  try{await api('firms/delete',{id:firm.id});await refresh();toast('Firma silindi.');}
+  catch(error){toast(error.message);button.disabled=false;}
+});

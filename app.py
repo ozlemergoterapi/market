@@ -110,6 +110,18 @@ def audit(db, entity, record_id, before):
     db.execute("INSERT INTO edits(entity,record_id,changed_on,before_json) VALUES(?,?,?,?)", (entity,record_id,datetime.now(ZoneInfo("Europe/Istanbul")).isoformat(),json.dumps(before,ensure_ascii=False)))
 
 
+def delete_firm(record_id):
+    with connect() as db:
+        db.execute('BEGIN IMMEDIATE')
+        old = db.execute('SELECT * FROM firms WHERE id=?', (record_id,)).fetchone()
+        if not old:
+            raise ValueError('Firma bulunamadı.')
+        if db.execute('SELECT 1 FROM invoices WHERE firm_id=? LIMIT 1', (record_id,)).fetchone():
+            raise ValueError('Bu firmaya ait fatura kayıtları var. Ödenmiş faturalar dahil kayıtları korumak için firma silinemez. Firma adını Düzelt ile değiştirebilirsiniz.')
+        audit(db, 'firm_deleted', record_id, dict(old))
+        db.execute('DELETE FROM firms WHERE id=?', (record_id,))
+
+
 def create_invoice(data, record_id=None):
     issued = date.fromisoformat(data['issued'])
     days = int(data['days'])
@@ -219,6 +231,8 @@ class Handler(BaseHTTPRequestHandler):
                 create_invoice(data, int(data['id']))
             elif self.path == '/api/payments/edit':
                 create_payment(data, int(data['id']))
+            elif self.path == '/api/firms/delete':
+                delete_firm(int(data['id']))
             elif self.path == '/api/firms/edit':
                 with connect() as db:
                     db.execute('BEGIN IMMEDIATE')
