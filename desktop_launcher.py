@@ -84,7 +84,7 @@ def main():
 
     Label(window, text='SANCAKLI MARKET', font=('Arial', 22, 'bold')).pack(pady=(8, 4))
     Label(window, text='Kaliteli Ürün, Güvenilir Hizmet', font=('Arial', 12)).pack(pady=(0, 18))
-    Label(window, text='Uygulama bu bilgisayarda çalışıyor.\nKayıtlarınız yerel olarak saklanıyor.',
+    Label(window, text='Uygulama bu bilgisayarda çalışıyor.\nBu pencereyi küçültebilirsiniz; kapatmak için aşağıdaki düğmeyi kullanın.',
           justify='center').pack(pady=(0, 12))
     Label(window, text=backup_message, wraplength=400, fg='#52645a').pack(pady=(0, 16))
 
@@ -103,7 +103,10 @@ def main():
 
     Button(window, text='Uygulamayı Aç', command=open_application, width=22).pack(pady=4)
     Button(window, text='Uygulamayı Kapat', command=close_application, width=22).pack(pady=4)
-    window.protocol('WM_DELETE_WINDOW', close_application)
+    # The browser remains visible after the local server stops. Treat the
+    # title-bar close action as minimize so users do not unknowingly keep a
+    # disconnected, cached page open. The explicit button performs shutdown.
+    window.protocol('WM_DELETE_WINDOW', window.iconify)
     window.after(700, open_application)
     window.mainloop()
 

@@ -10,8 +10,13 @@ const currency = cents => new Intl.NumberFormat('tr-TR',{style:'currency',curren
 const unitCurrency = cents => new Intl.NumberFormat('tr-TR',{style:'currency',currency:'TRY',minimumFractionDigits:2,maximumFractionDigits:2}).format(cents/100);
 const niceDate = s => new Date(s+'T12:00:00').toLocaleDateString('tr-TR',{day:'numeric',month:'short',year:'numeric'});
 async function api(path, data) {
-  const r = await fetch('/api/'+path,data===undefined?{}:{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});
-  const value = await r.json();
+  let r,value;
+  try{
+    r = await fetch('/api/'+path,data===undefined?{}:{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});
+    value = await r.json();
+  }catch(error){
+    throw new Error('Uygulama bağlantısı kapandı. Masaüstündeki Sancaklı Market simgesinden uygulamayı yeniden açın.');
+  }
   if(!r.ok) throw new Error(value.error || 'İşlem tamamlanamadı.');
   return value;
 }
