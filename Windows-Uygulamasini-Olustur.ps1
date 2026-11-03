@@ -18,7 +18,7 @@ if (-not $pythonCommand) {
 Write-Host 'Sancaklı Market Windows uygulaması hazırlanıyor...'
 & $pythonCommand @pythonPrefix -m venv .windows-build-env
 $venvPython = Join-Path $PSScriptRoot '.windows-build-env\Scripts\python.exe'
-& $venvPython -m pip install --quiet --upgrade pyinstaller
+& $venvPython -m pip install --quiet --upgrade pyinstaller pillow
 & $venvPython -m PyInstaller --noconfirm --clean --windowed --onefile `
     --name 'Sancakli-Market' `
     --icon 'static\logo.png' `
