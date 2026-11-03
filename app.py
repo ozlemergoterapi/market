@@ -13,6 +13,7 @@ from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import unquote
 from zoneinfo import ZoneInfo
 from invoice_parser import parse_invoice, check_items, merge_readings
 from invoice_ocr import parse_tsv_table
@@ -178,6 +179,7 @@ def init():
           amount INTEGER NOT NULL CHECK(amount>0), paid_on TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS firm_ocr_profiles(firm_id INTEGER NOT NULL REFERENCES firms(id),supplier_alias TEXT NOT NULL,
           sample_count INTEGER NOT NULL DEFAULT 1,last_seen TEXT NOT NULL,PRIMARY KEY(firm_id,supplier_alias));
+        CREATE TABLE IF NOT EXISTS form_drafts(draft_key TEXT PRIMARY KEY,payload TEXT NOT NULL,updated_on TEXT NOT NULL);
         ''')
         if 'identity' not in {r[1] for r in db.execute('PRAGMA table_info(invoices)')}:
             db.execute("ALTER TABLE invoices ADD COLUMN identity TEXT NOT NULL DEFAULT ''")
@@ -213,6 +215,39 @@ def clean(value, label, max_length=200):
     if not isinstance(value, str) or not value.strip() or len(value) > max_length:
         raise ValueError(f'{label} alanını doldurun (en fazla {max_length} karakter).')
     return value.strip()
+
+
+def draft_key(value):
+    value = str(value or '')
+    if not re.fullmatch(r'(firm|invoice|payment|entry):(new|[1-9][0-9]*)', value):
+        raise ValueError('Taslak türü geçersiz.')
+    return value
+
+
+def save_draft(key, payload):
+    key = draft_key(key)
+    if not isinstance(payload, dict):
+        raise ValueError('Taslak içeriği geçersiz.')
+    serialized = json.dumps(payload, ensure_ascii=False, separators=(',', ':'))
+    if len(serialized.encode('utf-8')) > 11 * 1024 * 1024:
+        raise ValueError('Taslak en fazla 11 MB olabilir.')
+    with connect() as db:
+        db.execute('''INSERT INTO form_drafts(draft_key,payload,updated_on) VALUES(?,?,?)
+          ON CONFLICT(draft_key) DO UPDATE SET payload=excluded.payload,updated_on=excluded.updated_on''',
+          (key, serialized, datetime.now(ZoneInfo('Europe/Istanbul')).isoformat()))
+
+
+def load_draft(key):
+    key = draft_key(key)
+    with connect() as db:
+        row = db.execute('SELECT payload,updated_on FROM form_drafts WHERE draft_key=?', (key,)).fetchone()
+    return dict(payload=json.loads(row['payload']), updated_on=row['updated_on']) if row else None
+
+
+def clear_draft(key):
+    key = draft_key(key)
+    with connect() as db:
+        db.execute('DELETE FROM form_drafts WHERE draft_key=?', (key,))
 
 
 def photo(value):
@@ -678,6 +713,11 @@ class Handler(BaseHTTPRequestHandler):
         self.path = self.path.split("?", 1)[0]
         if self.path == '/api/state':
             return self.respond(state())
+        if self.path.startswith('/api/draft/'):
+            try:
+                return self.respond({'draft': load_draft(unquote(self.path[len('/api/draft/'):]))})
+            except ValueError as error:
+                return self.respond({'error': str(error)}, 400)
         if self.path.startswith('/api/photo/'):
             try:
                 with connect() as db:
@@ -728,6 +768,11 @@ class Handler(BaseHTTPRequestHandler):
                 create_account_entry(data)
             elif self.path == '/api/account-entries/edit':
                 create_account_entry(data, int(data['id']))
+            elif self.path == '/api/drafts':
+                if data.get('action') == 'clear':
+                    clear_draft(data.get('key'))
+                else:
+                    save_draft(data.get('key'), data.get('payload'))
             elif self.path == '/api/account-entries/delete':
                 delete_record('entry',int(data['id']))
             elif self.path == '/api/firms/delete':

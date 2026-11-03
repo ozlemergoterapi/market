@@ -20,6 +20,44 @@ async function api(path, data) {
   if(!r.ok) throw new Error(value.error || 'İşlem tamamlanamadı.');
   return value;
 }
+const draftKinds={'firm-form':'firm','invoice-form':'invoice','payment-form':'payment','account-entry-form':'entry'};
+const draftTimers=new WeakMap(),draftLast=new Map(),draftRestoreTokens=new WeakMap();
+function formDraftKey(form){const kind=draftKinds[form?.id];return kind?kind+':'+(form.dataset.editId||'new'):null;}
+function formDraftSnapshot(form){
+  const fields=[...form.elements].filter(element=>element.name).map(element=>({name:element.name,value:element.value,checked:element.type==='checkbox'||element.type==='radio'?element.checked:null}));
+  const payload={fields};
+  if(form.id==='invoice-form'){
+    payload.expectedCount=$('#expected-item-count').value;payload.activeImportCheck=activeImportCheck;payload.lastOcrSupplier=lastOcrSupplier;
+    payload.photos=[...selectedPhotos];payload.pdfOcrIndexes=selectedPhotos.map((photo,index)=>pdfOcrPhotos.has(photo)?index:null).filter(index=>index!==null);
+    payload.textLayers=selectedPhotos.map(photo=>pdfTextLayers.get(photo)||null);
+    payload.items=[...$('#item-rows').children].map(row=>({product:row.querySelector('.product').value,unit:row.querySelector('.unit').value,price:row.querySelector('.price').value,rowNumber:row.querySelector('.row-number').value,lineTotal:row.querySelector('.line-total').value,vat:row.querySelector('.vat').value,quantity:row.querySelector('.quantity').value,code:row.querySelector('.code').value,sourceNet:row.dataset.sourceNet||'',sourceVat:row.dataset.sourceVat||''}));
+  }
+  return payload;
+}
+function applyDraftFields(form,fields=[]){
+  fields.forEach(saved=>{const elements=[...form.elements].filter(element=>element.name===saved.name);elements.forEach(element=>{if(saved.checked!==null&&(element.type==='checkbox'||element.type==='radio'))element.checked=Boolean(saved.checked);else element.value=saved.value??'';});});
+}
+async function restoreFormDraft(form){
+  const key=formDraftKey(form);if(!key)return;const token=(draftRestoreTokens.get(form)||0)+1;draftRestoreTokens.set(form,token);
+  try{
+    const result=await api('draft/'+encodeURIComponent(key));
+    if(draftRestoreTokens.get(form)!==token||formDraftKey(form)!==key||!result.draft)return;
+    const payload=result.draft.payload||{};applyDraftFields(form,payload.fields);
+    if(form.id==='invoice-form'){
+      activeImportCheck=payload.activeImportCheck||null;lastOcrSupplier=payload.lastOcrSupplier||'';$('#expected-item-count').value=payload.expectedCount||'';
+      selectedPhotos=Array.isArray(payload.photos)?payload.photos:[];selectedPhoto=selectedPhotos[0]||null;pdfOcrPhotos=new Set((payload.pdfOcrIndexes||[]).map(index=>selectedPhotos[index]).filter(Boolean));pdfTextLayers=new Map(selectedPhotos.map((photo,index)=>[photo,payload.textLayers?.[index]]).filter(([,layer])=>layer));renderSelectedPhotos();
+      $('#item-rows').innerHTML='';(payload.items||[]).forEach(item=>{$('#add-item').click();const row=$('#item-rows').lastElementChild;row.querySelector('.product').value=item.product||'';row.querySelector('.unit').value=item.unit||'';row.querySelector('.price').value=item.price||'';row.querySelector('.row-number').value=item.rowNumber||'';row.querySelector('.line-total').value=item.lineTotal||'';row.querySelector('.vat').value=item.vat||'';row.querySelector('.quantity').value=item.quantity||'';row.querySelector('.code').value=item.code||'';row.dataset.sourceNet=item.sourceNet||'';row.dataset.sourceVat=item.sourceVat||'';});
+      updateDue();renderImportCheck();
+    }
+    draftLast.set(key,JSON.stringify(formDraftSnapshot(form)));toast('Kaydedilmemiş taslağınız otomatik geri getirildi.');
+  }catch(error){toast('Taslak geri getirilemedi: '+error.message);}
+}
+function scheduleFormDraft(form){
+  const key=formDraftKey(form);if(!key||!form.closest('dialog[open]'))return;clearTimeout(draftTimers.get(form));draftTimers.set(form,setTimeout(async()=>{const payload=formDraftSnapshot(form),serialized=JSON.stringify(payload);if(draftLast.get(key)===serialized)return;try{await api('drafts',{key,payload});draftLast.set(key,serialized);}catch(error){toast('Otomatik taslak kaydedilemedi: '+error.message);}},700));
+}
+function clearFormDraft(form,key=formDraftKey(form)){if(!key)return Promise.resolve();draftLast.delete(key);return api('drafts',{action:'clear',key}).catch(()=>{});}
+document.addEventListener('input',event=>scheduleFormDraft(event.target.closest('form')));
+document.addEventListener('change',event=>scheduleFormDraft(event.target.closest('form')));
 function toast(message){$('#notice').textContent=message;$('#notice').hidden=false;setTimeout(()=>$('#notice').hidden=true,6000);}
 function empty(title,text){return `<div class="empty"><b>${esc(title)}</b>${esc(text)}</div>`;}
 function table(head,rows){return `<table><thead><tr>${head.map(h=>`<th>${h}</th>`).join('')}</tr></thead><tbody>${rows.join('')}</tbody></table>`;}
@@ -192,7 +230,7 @@ $('#batch-files').onchange=async event=>{
   }catch(error){batchQueue=[];renderBatchQueue();$('#batch-status').textContent=error.message||'PDF sırası hazırlanamadı.';}
 };
 $('#start-batch').onclick=openBatchInvoice;
-$('#new-firm').onclick=()=>{setMode('firm',null);$('#firm-form').reset();$('#firm-form .form-error').textContent='';$('#firm-dialog').showModal();};
+$('#new-firm').onclick=()=>{setMode('firm',null);$('#firm-form').reset();$('#firm-form .form-error').textContent='';$('#firm-dialog').showModal();restoreFormDraft($('#firm-form'));};
 function openAccountEntry(kind,id=null){
   if(!state.firms.length){toast('Önce firma ekleyin.');$('#new-firm').click();return;}
   const form=$('#account-entry-form'),entry=id?[...state.openings,...state.credits].find(value=>value.id===id):null;
@@ -206,7 +244,7 @@ function openAccountEntry(kind,id=null){
   const fillInvoices=()=>{const firmId=Number(form.elements.firm_id.value);form.elements.invoice_id.innerHTML=state.invoices.filter(invoice=>invoice.firm_id===firmId&&(invoice.remaining>0||invoice.id===entry?.invoice_id)).map(invoice=>`<option value="${invoice.id}">${esc(invoice.number)} · Kalan ${currency(invoice.remaining+(invoice.id===entry?.invoice_id?entry.amount:0))}</option>`).join('');if(entry?.invoice_id)form.elements.invoice_id.value=entry.invoice_id;};
   fillInvoices();form.elements.firm_id.onchange=fillInvoices;
   form.querySelector('#account-entry-help').textContent=credit?'Tutar seçilen faturanın kalan borcundan düşer ve ödeme planı hemen güncellenir.':'Bu eski borç vade tarihinde ödeme ajandasında görünür ve ödeme kaydedildikçe azalır.';
-  form.querySelector('.form-error').textContent='';form.querySelector('button.primary').textContent=id?'Düzeltmeyi kaydet':'Kaydet';$('#account-entry-dialog').showModal();
+  form.querySelector('.form-error').textContent='';form.querySelector('button.primary').textContent=id?'Düzeltmeyi kaydet':'Kaydet';$('#account-entry-dialog').showModal();restoreFormDraft(form);
 }
 $('#new-opening').onclick=()=>openAccountEntry('opening');
 $('#new-credit').onclick=()=>openAccountEntry('credit');
@@ -219,7 +257,7 @@ $('#new-invoice').onclick=()=>{
   renderSelectedPhotos();$('#ocr-text').hidden=true;$('#copy-ocr').hidden=true;$('#ocr-review').hidden=true;$('#ocr-status').textContent='PDF veya fotoğraf isteğe bağlıdır. Okunan yazılar otomatik kaydedilmez.';
   $('#item-rows').innerHTML='';renderImportCheck();$('#due-preview').value='';
   $('#firm-select').innerHTML=state.firms.map(f=>`<option value="${f.id}">${esc(f.name)}</option>`).join('');
-  $('#invoice-form [name=issued]').value=state.today;$('#invoice-dialog').showModal();
+  $('#invoice-form [name=issued]').value=state.today;$('#invoice-dialog').showModal();restoreFormDraft($('#invoice-form'));
 };
 function updateDue(){const form=$('#invoice-form'),issued=form.elements.issued.value,days=form.elements.days.value;if(!issued||days==='')return;const d=new Date(issued+'T12:00:00Z');d.setUTCDate(d.getUTCDate()+Number(days));if(Number.isNaN(d.getTime()))return;$('#due-preview').value=d.toISOString().slice(0,10);}
 $('#invoice-form [name=issued]').oninput=updateDue;$('#invoice-form [name=days]').oninput=updateDue;
@@ -241,7 +279,7 @@ $('#add-item').onclick=()=>{
 
 
   row.querySelector('.row-number').required=Boolean(activeImportCheck);row.querySelector('.line-total').required=Boolean(activeImportCheck);
-  row.querySelector('button').onclick=()=>{row.remove();renderImportCheck();};$('#item-rows').append(row);
+  row.querySelector('button').onclick=()=>{row.remove();renderImportCheck();scheduleFormDraft($('#invoice-form'));};$('#item-rows').append(row);scheduleFormDraft($('#invoice-form'));
 };
 function photoBytes(value){
   const base64=value.split(',')[1]||'';
@@ -442,7 +480,7 @@ function photoSelectionChanged(){
   $('.confirm input').checked=false;
   $('#ocr-text').hidden=true;$('#copy-ocr').hidden=true;$('#ocr-review').hidden=true;
   renderSelectedPhotos();
-  $('#ocr-status').textContent=selectedPhotos.length+' sayfa eklendi. Tüm sayfaları okumak için “Faturayı oku ve alanları doldur” düğmesine basın. Önceden doldurulmuş alanları yeniden kontrol edin.';
+  $('#ocr-status').textContent=selectedPhotos.length+' sayfa eklendi. Tüm sayfaları okumak için “Faturayı oku ve alanları doldur” düğmesine basın. Önceden doldurulmuş alanları yeniden kontrol edin.';scheduleFormDraft($('#invoice-form'));
 }
 $('#add-photo').onclick=()=>$('#photo').click();
 $('#photo-previews').onclick=e=>{
@@ -534,19 +572,20 @@ $('#read-photo').onclick=async()=>{
     renderImportCheck();$('.confirm input').checked=false;
     $('#ocr-review').hidden=false;
     $('#ocr-review').textContent=(draft.supplier?'Okunan firma: '+draft.supplier+'\n':'')+draft.warnings.join('\n');
-    $('#ocr-status').textContent=`${draft.items.length} ürün satırı ve okunabilen fatura alanları dolduruldu. Henüz kaydedilmedi. Tüm sayfaların eksiksiz okunduğunu kontrol edin; boş alanları tamamlayın. Birim fiyatlar satır tutarı + KDV üzerinden hesaplandı.`;
+    $('#ocr-status').textContent=`${draft.items.length} ürün satırı ve okunabilen fatura alanları dolduruldu. Henüz kaydedilmedi. Tüm sayfaların eksiksiz okunduğunu kontrol edin; boş alanları tamamlayın. Birim fiyatlar satır tutarı + KDV üzerinden hesaplandı.`;scheduleFormDraft(form);
   }catch(e){$('#ocr-status').textContent=e.message;}
   finally{$('#read-photo').disabled=false;$('#add-photo').disabled=false;form.querySelector('button.primary').disabled=false;}
 };
 
 document.addEventListener('click',async e=>{
   const pay=e.target.closest('[data-pay]'),payOpening=e.target.closest('[data-pay-opening]'),photo=e.target.closest('[data-photo]');
-  if(pay||payOpening){setMode('payment',null);const opening=Boolean(payOpening);const i=opening?state.openings.find(i=>i.id===Number(payOpening.dataset.payOpening)):state.invoices.find(i=>i.id===Number(pay.dataset.pay));const f=$('#payment-form');f.reset();f.querySelector('.form-error').textContent='';paymentOptions(f);f.elements.target.value=(opening?'opening:':'invoice:')+i.id;f.elements.amount.value=(i.remaining/100).toFixed(2);f.elements.amount.max=(i.remaining/100).toFixed(2);f.elements.paid_on.value=state.today;f.elements.paid_on.max=state.today;$('#payment-description').textContent=`${i.firm} · ${opening?(i.reference||'Açılış bakiyesi'):i.number} · Kalan ${currency(i.remaining)}`;$('#payment-dialog').showModal();}
+  if(pay||payOpening){setMode('payment',null);const opening=Boolean(payOpening);const i=opening?state.openings.find(i=>i.id===Number(payOpening.dataset.payOpening)):state.invoices.find(i=>i.id===Number(pay.dataset.pay));const f=$('#payment-form');f.reset();f.querySelector('.form-error').textContent='';paymentOptions(f);f.elements.target.value=(opening?'opening:':'invoice:')+i.id;f.elements.amount.value=(i.remaining/100).toFixed(2);f.elements.amount.max=(i.remaining/100).toFixed(2);f.elements.paid_on.value=state.today;f.elements.paid_on.max=state.today;$('#payment-description').textContent=`${i.firm} · ${opening?(i.reference||'Açılış bakiyesi'):i.number} · Kalan ${currency(i.remaining)}`;$('#payment-dialog').showModal();restoreFormDraft(f);}
   if(photo){try{const r=await api('photo/'+photo.dataset.photo);$('#photo-pages').innerHTML=(r.photos||[r.photo]).map((p,index)=>`<p>Sayfa ${index+1}</p><img src="${esc(p)}" alt="Fatura sayfa ${index+1}" style="max-width:100%">`).join('');$('#photo-dialog').showModal();}catch(e){toast(e.message);}}
 });
 for(const [id,path] of [['firm','firms'],['invoice','invoices'],['payment','payments']]){
   $('#'+id+'-form').onsubmit=async e=>{
     e.preventDefault();const form=e.target,button=form.querySelector('button.primary'),error=form.querySelector('.form-error');error.textContent='';
+    const savedDraftKey=formDraftKey(form);
     if((photoLoading||$('#read-photo').disabled)&&id==='invoice'){error.textContent='Fatura dosyasının hazırlanmasını bekleyin.';return;}
     const data=Object.fromEntries(new FormData(form));
     if(id==='payment'){
@@ -568,7 +607,7 @@ for(const [id,path] of [['firm','firms'],['invoice','invoices'],['payment','paym
         if(!window.confirm(warning))throw new Error('Mükerrer olabilecek fatura kaydedilmedi.');
         data.duplicate_confirmed=true;await api(path+(editing?'/edit':''),data);
       }
-      form.closest('dialog').close();await refresh();
+      await clearFormDraft(form,savedDraftKey);form.closest('dialog').close();await refresh();
       if(id==='invoice'&&!editing&&batchActive&&form.dataset.batchJob){batchIndex++;renderBatchQueue();if(batchIndex<batchQueue.length){toast('Fatura kaydedildi. Sıradaki PDF açılıyor.');setTimeout(openBatchInvoice,250);}else{batchActive=false;renderBatchQueue();toast('Toplu PDF sırası tamamlandı.');}}
       else toast(editing?'Düzeltme kaydedildi; bakiyeler ve fiyat değişimleri güncellendi.':'Kaydınız oluşturuldu.');
     }
@@ -577,9 +616,9 @@ for(const [id,path] of [['firm','firms'],['invoice','invoices'],['payment','paym
 }
 $('#account-entry-form').onsubmit=async event=>{
   event.preventDefault();const form=event.target,button=form.querySelector('button.primary'),error=form.querySelector('.form-error');error.textContent='';
-  const data=Object.fromEntries(new FormData(form)),editing=form.dataset.editId;if(editing)data.id=Number(editing);
+  const data=Object.fromEntries(new FormData(form)),editing=form.dataset.editId,savedDraftKey=formDraftKey(form);if(editing)data.id=Number(editing);
   button.disabled=true;
-  try{await api('account-entries'+(editing?'/edit':''),data);form.closest('dialog').close();await refresh();toast(editing?'Cari hareket düzeltildi; tüm bakiyeler güncellendi.':'Cari hareket kaydedildi; tüm bakiyeler güncellendi.');}
+  try{await api('account-entries'+(editing?'/edit':''),data);await clearFormDraft(form,savedDraftKey);form.closest('dialog').close();await refresh();toast(editing?'Cari hareket düzeltildi; tüm bakiyeler güncellendi.':'Cari hareket kaydedildi; tüm bakiyeler güncellendi.');}
   catch(value){error.textContent=value.message;}finally{button.disabled=false;}
 };
 refresh().catch(e=>toast('Veriler yüklenemedi: '+e.message));
@@ -598,7 +637,7 @@ function paymentOptions(form,type=null){
 document.addEventListener('click',async e=>{
   const firm=e.target.closest('[data-edit-firm]'),invoice=e.target.closest('[data-edit-invoice]'),entry=e.target.closest('[data-edit-entry]'),payment=e.target.closest('[data-edit-payment]'),approve=e.target.closest('[data-approve]');
   if(firm){
-    $('#new-firm').click();const f=state.firms.find(f=>f.id===Number(firm.dataset.editFirm));setMode('firm',f.id);$('#firm-form [name=name]').value=f.name;
+    $('#new-firm').click();const f=state.firms.find(f=>f.id===Number(firm.dataset.editFirm));setMode('firm',f.id);$('#firm-form [name=name]').value=f.name;restoreFormDraft($('#firm-form'));
   }
   if(invoice){
     invoice.closest('#firm-history-dialog,#price-history-dialog')?.close();
@@ -612,11 +651,12 @@ document.addEventListener('click',async e=>{
       catch(error){form.closest('dialog').close();toast('Fatura sayfaları yüklenemedi. Kaydı yeniden açın.');}
       finally{photoLoading=false;form.querySelector('button.primary').disabled=false;}
     }
+    restoreFormDraft(form);
   }
   if(entry){entry.closest('#firm-history-dialog')?.close();openAccountEntry(null,Number(entry.dataset.editEntry));}
   if(payment){
     payment.closest('#firm-history-dialog')?.close();
-    const type=payment.dataset.paymentType||'invoice';const p=state.payments.find(p=>p.id===Number(payment.dataset.editPayment)&&p.target_type===type);const form=$('#payment-form');form.reset();setMode('payment',p.id);paymentOptions(form,p.target_type);form.elements.target.value=p.target_type+':'+p.target_id;form.elements.amount.value=(p.amount/100).toFixed(2);form.elements.amount.removeAttribute('max');form.elements.paid_on.value=p.paid_on;form.elements.paid_on.max=state.today;form.querySelector('.form-error').textContent='';$('#payment-description').textContent='Tutarı, tarihi veya aynı türde yanlış seçilen borcu düzeltebilirsiniz.';$('#payment-dialog').showModal();
+    const type=payment.dataset.paymentType||'invoice';const p=state.payments.find(p=>p.id===Number(payment.dataset.editPayment)&&p.target_type===type);const form=$('#payment-form');form.reset();setMode('payment',p.id);paymentOptions(form,p.target_type);form.elements.target.value=p.target_type+':'+p.target_id;form.elements.amount.value=(p.amount/100).toFixed(2);form.elements.amount.removeAttribute('max');form.elements.paid_on.value=p.paid_on;form.elements.paid_on.max=state.today;form.querySelector('.form-error').textContent='';$('#payment-description').textContent='Tutarı, tarihi veya aynı türde yanlış seçilen borcu düzeltebilirsiniz.';$('#payment-dialog').showModal();restoreFormDraft(form);
   }
   if(approve){
     approve.disabled=true;

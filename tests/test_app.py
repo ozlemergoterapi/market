@@ -326,6 +326,15 @@ class LedgerTests(unittest.TestCase):
                 add_ocr_paths()
                 self.assertEqual(os.environ['TESSDATA_PREFIX'], str(language_directory))
 
+    def test_form_drafts_are_saved_restored_and_cleared(self):
+        payload = {'fields': [{'name': 'amount', 'value': '9000'}], 'items': []}
+        app.save_draft('entry:new', payload)
+        self.assertEqual(app.load_draft('entry:new')['payload'], payload)
+        app.clear_draft('entry:new')
+        self.assertIsNone(app.load_draft('entry:new'))
+        with self.assertRaisesRegex(ValueError, 'Taslak türü'):
+            app.save_draft('../market', payload)
+
 
 if __name__ == '__main__':
     unittest.main()
