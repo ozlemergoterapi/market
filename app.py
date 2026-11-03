@@ -5,6 +5,7 @@ import json
 import os
 import re
 import sqlite3
+import statistics
 import subprocess
 import sys
 import tempfile
@@ -208,9 +209,9 @@ def money(value):
         raise ValueError('Geçerli bir tutar girin.')
 
 
-def clean(value, label):
-    if not isinstance(value, str) or not value.strip() or len(value) > 200:
-        raise ValueError(f'{label} alanını doldurun (en fazla 200 karakter).')
+def clean(value, label, max_length=200):
+    if not isinstance(value, str) or not value.strip() or len(value) > max_length:
+        raise ValueError(f'{label} alanını doldurun (en fazla {max_length} karakter).')
     return value.strip()
 
 
@@ -241,8 +242,52 @@ def tsv_reading(tsv_text):
     return dict(
         number='', issued='', total='', supplier='', firm_id=None,
         items=table['items'], warnings=[], table_warnings=table['warnings'],
-        sources={}, import_check={'expected_rows': table['expected_rows'],'detected_rows':table.get('detected_rows',[])},
+        sources={}, import_check={'expected_rows': table['expected_rows'],'detected_rows':table.get('detected_rows',[]),'line_total_kind':'net'},
     )
+
+
+def pdf_text_readings(layers, firms):
+    """Convert PDF.js text coordinates into exact parser readings."""
+    if not isinstance(layers, list) or len(layers) > 6:
+        raise ValueError('PDF metin katmanı geçersiz.')
+    tsv = ['level\tpage_num\tblock_num\tpar_num\tline_num\tword_num\tleft\ttop\twidth\theight\tconf\ttext']
+    visible_pages = []
+    word_number = 0
+    for page_number, layer in enumerate(layers, 1):
+        if not isinstance(layer, dict) or not isinstance(layer.get('words'), list) or len(layer['words']) > 10000:
+            raise ValueError('PDF metin katmanı geçersiz.')
+        words = []
+        for raw in layer['words']:
+            try:
+                text = str(raw['text']).replace('\t',' ').replace('\r',' ').replace('\n',' ').strip()
+                left, top = int(raw['left']), int(raw['top'])
+                width, height = int(raw['width']), int(raw['height'])
+            except (KeyError, TypeError, ValueError):
+                raise ValueError('PDF metin katmanı geçersiz.')
+            if not text:
+                continue
+            if not (0 <= left <= 20000 and 0 <= top <= 30000 and 1 <= width <= 20000 and 1 <= height <= 5000):
+                raise ValueError('PDF metin koordinatları geçersiz.')
+            word_number += 1
+            words.append(dict(text=text,left=left,top=top,width=width,height=height,center=top+height/2))
+            tsv.append(f'5\t{page_number}\t1\t1\t1\t{word_number}\t{left}\t{top}\t{width}\t{height}\t100\t{text}')
+        if words:
+            tolerance=max(3,statistics.median(word['height'] for word in words)*.65)
+            lines=[]
+            for word in sorted(words,key=lambda value:(value['center'],value['left'])):
+                line=next((entry for entry in reversed(lines[-4:]) if abs(entry['center']-word['center'])<=tolerance),None)
+                if line is None:
+                    line=dict(center=word['center'],words=[]);lines.append(line)
+                line['words'].append(word)
+                line['center']=sum(value['center'] for value in line['words'])/len(line['words'])
+            visible_pages.append('\n'.join(' '.join(word['text'] for word in sorted(line['words'],key=lambda value:value['left'])) for line in lines))
+    if not word_number:
+        return [], ''
+    positioned = tsv_reading('\n'.join(tsv))
+    plain = parse_invoice('\n'.join(visible_pages), firms)
+    positioned_rows={item['row_number'] for item in positioned['items']}
+    plain['items']=[item for item in plain['items'] if item['row_number'] not in positioned_rows]
+    return [positioned,plain], '\n'.join(visible_pages)
 
 
 def run_tesseract(pic, lang, mode, with_tsv=True):
@@ -468,7 +513,7 @@ def create_invoice(data, record_id=None):
         line_total=str(t.get('line_total') or '')
         if len(row_number)>5 or len(line_total)>30:
             raise ValueError('Satır bilgileri geçersiz.')
-        rows.append((clean(t['product'], 'Ürün'), clean(t['unit'], 'Ambalaj / fiyat birimi'), cents, str(value), quantity, code, *source,row_number,line_total))
+        rows.append((clean(t['product'], 'Ürün', 500), clean(t['unit'], 'Ambalaj / fiyat birimi'), cents, str(value), quantity, code, *source,row_number,line_total))
     if len({(p.casefold(), u.casefold()) for p,u,*_ in rows}) != len(rows):
         raise ValueError('Aynı ürün ve birimi faturada bir kez girin.')
     with connect() as db:
@@ -738,6 +783,11 @@ class Handler(BaseHTTPRequestHandler):
                     firms = [dict(r) for r in db.execute('''SELECT id,name FROM firms
                       UNION ALL SELECT firm_id AS id,supplier_alias AS name FROM firm_ocr_profiles''')]
                 readings, visible_text = [], []
+                pdf_layers = data.get('pdf_text_layers') or []
+                pdf_readings, pdf_text = pdf_text_readings(pdf_layers, firms)
+                if pdf_readings:
+                    readings.extend(pdf_readings)
+                    visible_text.append('--- PDF içindeki orijinal metin ---\n'+pdf_text)
 
                 def add_layout(mode, with_tsv=True, supplemental=False):
                     existing = {
@@ -757,10 +807,10 @@ class Handler(BaseHTTPRequestHandler):
                                 kept = []
                                 for item in positioned['items']:
                                     previous = existing.get(item['row_number'])
-                                    if previous is None or core(previous) == core(item):
+                                    if previous is None:
                                         kept.append(item)
                                         existing.setdefault(item['row_number'],item)
-                                    else:
+                                    elif core(previous) != core(item):
                                         conflicting.append(item['row_number'])
                                 positioned['items'] = kept
                                 if conflicting:
@@ -779,7 +829,7 @@ class Handler(BaseHTTPRequestHandler):
                         if supplemental:
                             plain['items'] = [
                                 item for item in plain['items']
-                                if item['row_number'] not in existing or core(existing[item['row_number']]) == core(item)
+                                if item['row_number'] not in existing
                             ]
                             for item in plain['items']:
                                 existing.setdefault(item['row_number'],item)
@@ -787,7 +837,7 @@ class Handler(BaseHTTPRequestHandler):
 
                 # PSM 4 keeps ruled invoice tables as columns; TSV coordinates put
                 # the cells back into rows. Sparse text is a conservative fallback.
-                add_layout(4)
+                add_layout(4, supplemental=bool(pdf_readings))
                 draft = merge_readings(readings)
                 def table_errors(value):
                     return [

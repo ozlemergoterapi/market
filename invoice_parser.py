@@ -215,7 +215,7 @@ def parse_invoice(text, firms=()):
             review = ''
             if net > qty*raw_price+Decimal('.10') or net < qty*raw_price*Decimal('.5'):
                 review = 'Miktar ile satır/birim fiyatı arasında büyük fark var. Adet, koli ve iskonto bilgilerini kontrol edin.'
-            parsed_items.append(dict(row_number=row_number, line_total=str(net+vat), review=review, product=product[:200], unit=unit.lower(), price=str(price), code=code,
+            parsed_items.append(dict(row_number=row_number, line_total=str(net), review=review, product=product[:500], unit=unit.lower(), price=str(price), code=code,
                                      quantity=str(qty), source_price=str(raw_price), net=str(net), vat=str(vat)))
         except (InvalidOperation, ValueError):
             invalid_rows.add(row_number)
@@ -235,7 +235,7 @@ def parse_invoice(text, firms=()):
             if 1 <= row_number <= 500:
                 detected.add(row_number)
     expected = list(range(1,max(detected)+1)) if detected else []
-    result['import_check'] = {'expected_rows':expected,'detected_rows':sorted(detected)}
+    result['import_check'] = {'expected_rows':expected,'detected_rows':sorted(detected),'line_total_kind':'net'}
     result['coverage'] = check_items(result['items'],result['total'],result['import_check'])
     result['warnings'].extend(result['coverage']['errors'])
     for key, label in [('number','Fatura numarası'), ('issued','Fatura tarihi'), ('total','Ödenecek toplam')]:
@@ -259,6 +259,7 @@ def check_items(items, total, metadata):
         return dict(errors=['Fatura kalem kontrol bilgisi geçersiz. Yeniden okutun.'],read=len(items),expected=0,line_total='0.00')
     if not expected:
         errors.append('Faturadaki kalem sayısı belirlenemedi. Yeniden okutun.')
+    net_lines = isinstance(metadata,dict) and metadata.get('line_total_kind') == 'net'
     numbers=[]
     gross=Decimal('0')
     for item in items:
@@ -267,11 +268,13 @@ def check_items(items, total, metadata):
             quantity=Decimal(str(item.get('quantity') or '0'))
             price=Decimal(str(item.get('price') or '0'))
             amount=Decimal(str(item.get('line_total') or 'NaN'))
-            if not all(v.is_finite() for v in (quantity,price,amount)) or quantity<=0 or price<=0 or amount<=0 or amount>999999999:
+            vat=Decimal(str(item.get('vat') or '0')) if net_lines else Decimal('0')
+            gross_amount=amount+vat if net_lines else amount
+            if not all(v.is_finite() for v in (quantity,price,amount,vat,gross_amount)) or quantity<=0 or price<=0 or amount<=0 or vat<0 or gross_amount>999999999:
                 raise ValueError()
-            if abs(quantity*price-amount)>quantity*Decimal('.005')+Decimal('.02'):
-                errors.append(f'{number}. satırın miktarı × birim fiyatı, satır toplamıyla uyuşmuyor.')
-            gross+=amount
+            if abs(quantity*price-gross_amount)>quantity*Decimal('.005')+Decimal('.02'):
+                errors.append(f'{number}. satırın miktarı × KDV dahil birim fiyatı, satır tutarı ve KDV ile uyuşmuyor.')
+            gross+=gross_amount
             numbers.append(number)
         except (ValueError,TypeError,InvalidOperation):
             errors.append('Ürün miktarı, fiyatı, sıra no ve KDV dahil satır toplamı eksiksiz girilmeli.')
@@ -329,7 +332,8 @@ def merge_readings(readings):
         ignored=[number for number in detected if number>maximum]
     else:
         expected=expected_fallback
-    result['import_check']={'expected_rows':expected,'detected_rows':detected}
+    kinds={r.get('import_check',{}).get('line_total_kind') for r in readings if r.get('import_check',{}).get('line_total_kind')}
+    result['import_check']={'expected_rows':expected,'detected_rows':detected,'line_total_kind':'net' if kinds=={'net'} else ''}
     candidates=[item for reading in readings for item in reading.get('items',[])]
     candidates=[item for item in candidates if item.get('row_number') in set(expected)]
     result['items'], item_warnings = _consolidate_items(candidates, allow_consensus=True)

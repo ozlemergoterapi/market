@@ -299,9 +299,9 @@ def _item_from_band(anchor, words, table_left, table_right):
     confidence = statistics.fmean(confidence_values) if confidence_values else -1
     item = {
         "row_number": anchor.number,
-        "line_total": f"{gross:.2f}",
+        "line_total": f"{net:.2f}",
         "review": review,
-        "product": re.sub(r"\s+", " ", product_text).strip()[:200],
+        "product": re.sub(r"\s+", " ", product_text).strip()[:500],
         "unit": unit,
         "price": f"{price:.2f}",
         "code": anchor.code,
@@ -396,9 +396,9 @@ def _item_from_geometry(anchor, words):
     confidence = statistics.fmean(confidence_values) if confidence_values else -1
     return {
         "row_number": anchor.number,
-        "line_total": f"{gross:.2f}",
+        "line_total": f"{net:.2f}",
         "review": review,
-        "product": re.sub(r"\s+", " ", product_text).strip()[:200],
+        "product": re.sub(r"\s+", " ", product_text).strip()[:500],
         "unit": unit,
         "price": f"{price:.2f}",
         "code": anchor.code,
@@ -425,7 +425,11 @@ def _page_items(words):
     code_gap = statistics.median(anchor.code_word.left - anchor.ordinal.left for anchor in anchors)
 
     first_y = anchors[0].center_y - typical_gap * .55
-    last_y = anchors[-1].center_y + typical_gap * .90
+    # Stop the final row at the same half-row boundary used between rows.
+    # Invoice discount/summary labels can start immediately below the table;
+    # extending almost a full row used to append those labels to the last
+    # product name (for example ``ETIGENISK`` on a digital PDF).
+    last_y = anchors[-1].center_y + typical_gap * .55
     row_area = [word for word in words if first_y <= word.center_y < last_y]
     observed_right = max((word.right for word in row_area), default=table_left + 1)
     # In this layout the code column begins about 4% into the table. This
@@ -442,7 +446,7 @@ def _page_items(words):
         )
         bottom = (
             (anchor.center_y + anchors[index + 1].center_y) / 2
-            if index + 1 < len(anchors) else anchor.center_y + typical_gap * .90
+            if index + 1 < len(anchors) else anchor.center_y + typical_gap * .55
         )
         band = [word for word in words if top <= word.center_y < bottom]
         try:

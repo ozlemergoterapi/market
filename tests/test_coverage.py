@@ -7,6 +7,12 @@ class CoverageTests(unittest.TestCase):
         row=dict(row_number=1,quantity='18',price='26.38',line_total='474.82')
         self.assertEqual(check_items([row],'474.82',dict(expected_rows=[1]))['errors'],[])
 
+    def test_printed_net_and_vat_reconcile_to_payable_total(self):
+        row=dict(row_number=1,quantity='24',price='19.93',line_total='473.49',vat='4.72')
+        checked=check_items([row],'478.21',dict(expected_rows=[1],line_total_kind='net'))
+        self.assertEqual(checked['errors'],[])
+        self.assertEqual(checked['line_total'],'478.21')
+
     def test_missing_row_and_missing_total_are_not_success(self):
         row=dict(row_number=1,quantity='18',price='26.38',line_total='474.82')
         errors=check_items([row],'719.09',dict(expected_rows=[1,2]))['errors']

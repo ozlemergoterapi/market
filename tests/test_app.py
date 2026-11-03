@@ -284,6 +284,22 @@ class LedgerTests(unittest.TestCase):
         self.assertFalse(changed['approved'])
         self.assertLess(changed['change'],0)
 
+    def test_pdf_text_layer_preserves_exact_product_name_code_and_amounts(self):
+        words = []
+        def add(text, left, top, width):
+            words.append(dict(text=text,left=left,top=top,width=width,height=12))
+        add('1',50,100,20); add('3532900',86,100,65)
+        add('BENİMO',190,100,55); add('ÇİKOLATALI',250,100,90); add('80GX18KL',345,100,64)
+        add('18',416,100,22); add('Adet',450,100,35); add('27,7200',512,100,58)
+        add('%1,00',714,100,45); add('4,97',790,100,47); add('497,16',890,100,66)
+
+        readings, _ = app.pdf_text_readings([{'width':1000,'height':1400,'words':words}], [])
+
+        item = readings[0]['items'][0]
+        self.assertEqual(item['product'], 'BENİMO ÇİKOLATALI 80GX18KL')
+        self.assertEqual(item['code'], '3532900')
+        self.assertEqual((item['quantity'], item['line_total'], item['vat']), ('18', '497.16', '4.97'))
+
 
 if __name__ == '__main__':
     unittest.main()

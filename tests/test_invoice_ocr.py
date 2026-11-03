@@ -61,7 +61,8 @@ class InvoiceTsvTests(unittest.TestCase):
         self.assertEqual(first["code"], "8223298")
         self.assertEqual(first["quantity"], "18")
         self.assertEqual(first["price"], "26.38")
-        self.assertEqual(first["line_total"], "474.82")
+        self.assertEqual(first["line_total"], "470.13")
+        self.assertEqual(first["vat"], "4.69")
         self.assertIn("96GX18", first["product"])
 
     def test_overlapping_page_fragments_are_deduplicated(self):
@@ -77,6 +78,17 @@ class InvoiceTsvTests(unittest.TestCase):
         self.assertEqual(result["expected_rows"], [1, 2, 3])
         self.assertEqual([item["row_number"] for item in result["items"]], [1, 2, 3])
         self.assertFalse(any("çelişkili" in warning for warning in result["warnings"]))
+
+    def test_summary_text_below_final_row_is_not_part_of_product_name(self):
+        data = TsvBuilder()
+        data.item(36, "4431800", "NERO 110GX18 KL", 18, "23,7600", "4,26", "426,15", 100)
+        data.item(37, "4933600", "BUR. KREMALI 100GX12 DP", 12, "19,8000", "2,37", "236,75", 150)
+        # Summary text begins below the final row's half-row boundary.
+        data.add("ETIGENISK", 185, 180, 75)
+
+        result = parse_tsv_table(data.text())
+
+        self.assertEqual(result["items"][-1]["product"], "BUR. KREMALI 100GX12 DP")
 
     def test_missing_detected_row_is_reported(self):
         data = TsvBuilder()
@@ -131,7 +143,8 @@ class InvoiceTsvTests(unittest.TestCase):
         self.assertEqual(item["row_number"], 1)
         self.assertEqual(item["product"], "FARKLI MARKA URUN")
         self.assertEqual(item["quantity"], "12")
-        self.assertEqual(item["line_total"], "325.00")
+        self.assertEqual(item["line_total"], "300.00")
+        self.assertEqual(item["vat"], "25.00")
         self.assertIn("Farklı fatura sütun düzeniyle", item["review"])
 
     def test_low_confidence_numbers_require_user_review(self):
