@@ -193,6 +193,8 @@ def parse_invoice(text, firms=()):
     parsed_items, invalid_rows = [], set()
     for block in blocks:
         row_number = int(block.split()[0])
+        if not 1 <= row_number <= 500:
+            continue
         match = re.match(r'^\d{1,3}\s+(\d{5,14})\s+(.+?)\s+(\d+(?:[.,]\d+)*)\s*(Adet|Ad\.?|Kg|Koli|Lt|Litre)\s+(.+)', block, re.I)
         if not match:
             invalid_rows.add(row_number)
@@ -233,7 +235,7 @@ def parse_invoice(text, firms=()):
             if 1 <= row_number <= 500:
                 detected.add(row_number)
     expected = list(range(1,max(detected)+1)) if detected else []
-    result['import_check'] = {'expected_rows':expected}
+    result['import_check'] = {'expected_rows':expected,'detected_rows':sorted(detected)}
     result['coverage'] = check_items(result['items'],result['total'],result['import_check'])
     result['warnings'].extend(result['coverage']['errors'])
     for key, label in [('number','Fatura numarası'), ('issued','Fatura tarihi'), ('total','Ödenecek toplam')]:
@@ -307,11 +309,33 @@ def merge_readings(readings):
     else:
         result['warnings'].append('Firma eşleşmesini kontrol edin.')
     result['supplier']=next((r['supplier'] for r in readings if r.get('firm_id')==result['firm_id'] and r.get('supplier')),next((r['supplier'] for r in readings if r.get('supplier')),''))
-    expected=sorted({n for r in readings for n in r.get('import_check',{}).get('expected_rows',[])})
-    result['import_check']={'expected_rows':expected}
+    detected=sorted({n for r in readings for n in r.get('import_check',{}).get('detected_rows',[]) if isinstance(n,int) and 1<=n<=500})
+    expected_fallback=sorted({n for r in readings for n in r.get('import_check',{}).get('expected_rows',[]) if isinstance(n,int) and 1<=n<=500})
+    ignored=[]
+    if 1 in detected:
+        missing_run=0
+        maximum=0
+        detected_set=set(detected)
+        for number in range(1,max(detected)+1):
+            if number in detected_set:
+                maximum=number
+                missing_run=0
+            else:
+                missing_run+=1
+                if missing_run>=4:
+                    maximum=number-missing_run
+                    break
+        expected=list(range(1,maximum+1))
+        ignored=[number for number in detected if number>maximum]
+    else:
+        expected=expected_fallback
+    result['import_check']={'expected_rows':expected,'detected_rows':detected}
     candidates=[item for reading in readings for item in reading.get('items',[])]
+    candidates=[item for item in candidates if item.get('row_number') in set(expected)]
     result['items'], item_warnings = _consolidate_items(candidates, allow_consensus=True)
     result['warnings'].extend(item_warnings)
+    if ignored:
+        result['warnings'].append('Ürün tablosunun dışında okunan sıra numarası adayları göz ardı edildi: '+', '.join(map(str,ignored))+'.')
     result['warnings'].extend(
         warning for reading in readings
         for warning in reading.get('table_warnings', [])

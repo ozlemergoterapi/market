@@ -241,7 +241,7 @@ def tsv_reading(tsv_text):
     return dict(
         number='', issued='', total='', supplier='', firm_id=None,
         items=table['items'], warnings=[], table_warnings=table['warnings'],
-        sources={}, import_check={'expected_rows': table['expected_rows']},
+        sources={}, import_check={'expected_rows': table['expected_rows'],'detected_rows':table.get('detected_rows',[])},
     )
 
 
@@ -739,13 +739,35 @@ class Handler(BaseHTTPRequestHandler):
                       UNION ALL SELECT firm_id AS id,supplier_alias AS name FROM firm_ocr_profiles''')]
                 readings, visible_text = [], []
 
-                def add_layout(mode, with_tsv=True):
+                def add_layout(mode, with_tsv=True, supplemental=False):
+                    existing = {
+                        item['row_number']: item
+                        for reading in readings for item in reading.get('items', [])
+                    }
+                    def core(item):
+                        return tuple(str(item.get(key,'')) for key in ('code','quantity','line_total','net','vat'))
                     for index, pic in enumerate(photos, 1):
                         page_text, page_tsv = run_tesseract(pic, lang, mode, with_tsv)
                         visible_text.append(f'--- Görsel {index} · OCR düzeni {mode} ---\n{page_text}')
                         plain = parse_invoice(page_text, firms)
                         if page_tsv:
                             positioned = tsv_reading(page_tsv)
+                            if supplemental:
+                                conflicting = []
+                                kept = []
+                                for item in positioned['items']:
+                                    previous = existing.get(item['row_number'])
+                                    if previous is None or core(previous) == core(item):
+                                        kept.append(item)
+                                        existing.setdefault(item['row_number'],item)
+                                    else:
+                                        conflicting.append(item['row_number'])
+                                positioned['items'] = kept
+                                if conflicting:
+                                    positioned['table_warnings'].append(
+                                        'Ek OCR düzeninde farklı okunan satırlar ilk güvenilir okumayı değiştirmedi: '
+                                        + ', '.join(map(str,sorted(set(conflicting)))) + '.'
+                                    )
                             positioned_rows = {item['row_number'] for item in positioned['items']}
                             # Keep plain-text rows only when the coordinate reading
                             # did not already reconstruct that invoice row.
@@ -754,6 +776,13 @@ class Handler(BaseHTTPRequestHandler):
                                 if item['row_number'] not in positioned_rows
                             ]
                             readings.append(positioned)
+                        if supplemental:
+                            plain['items'] = [
+                                item for item in plain['items']
+                                if item['row_number'] not in existing or core(existing[item['row_number']]) == core(item)
+                            ]
+                            for item in plain['items']:
+                                existing.setdefault(item['row_number'],item)
                         readings.append(plain)
 
                 # PSM 4 keeps ruled invoice tables as columns; TSV coordinates put
@@ -766,10 +795,10 @@ class Handler(BaseHTTPRequestHandler):
                         if error != 'Fatura toplamı okunamadı veya eksik.'
                     ]
                 if not draft['items'] or table_errors(draft):
-                    add_layout(11)
+                    add_layout(11, supplemental=True)
                     draft = merge_readings(readings)
                 if not draft['items'] or table_errors(draft):
-                    add_layout(6)
+                    add_layout(6, supplemental=True)
                     draft = merge_readings(readings)
                 if not all(draft[key] for key in ('number', 'issued', 'total')):
                     for index, pic in enumerate(photos, 1):

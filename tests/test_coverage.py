@@ -38,3 +38,16 @@ class CoverageTests(unittest.TestCase):
         a=parse_invoice('Ödenecek Tutar 20,20 TL')
         b=parse_invoice('Ödenecek Tutar 200,20 TL')
         self.assertEqual(merge_readings([a,b])['total'],'')
+
+    def test_isolated_large_row_number_outside_table_is_ignored(self):
+        normal=parse_invoice('''1 1111111 URUN BIR 2 Adet 10,0000 TL % 1,00 0,20 TL 20,00 TL
+2 2222222 URUN IKI 2 Adet 10,0000 TL % 1,00 0,20 TL 20,00 TL
+3 3333333 URUN UC 2 Adet 10,0000 TL % 1,00 0,20 TL 20,00 TL
+Ödenecek Tutar 60,60 TL''')
+        noisy=parse_invoice('83 4444444 TABLO DISI YANLIS ADAY 2 Adet 10,0000 TL % 1,00 0,20 TL 20,00 TL')
+
+        merged=merge_readings([normal,noisy])
+
+        self.assertEqual(merged['import_check']['expected_rows'],[1,2,3])
+        self.assertEqual([item['row_number'] for item in merged['items']],[1,2,3])
+        self.assertTrue(any('83' in warning and 'göz ardı' in warning for warning in merged['warnings']))

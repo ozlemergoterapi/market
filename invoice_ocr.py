@@ -510,6 +510,7 @@ def parse_tsv_table(tsv_text):
     return {
         "items": items,
         "expected_rows": expected_rows,
+        "detected_rows": sorted(detected),
         "warnings": list(dict.fromkeys(warnings)),
     }
 
