@@ -30,6 +30,9 @@ def add_ocr_paths():
             str(Path(os.environ.get('ProgramFiles', r'C:\Program Files')) / 'Tesseract-OCR'),
             str(Path(os.environ.get('LOCALAPPDATA', '')) / 'Programs' / 'Tesseract-OCR'),
         ]
+        language_directory = storage_directory() / 'tessdata'
+        if language_directory.is_dir():
+            os.environ.setdefault('TESSDATA_PREFIX', str(language_directory))
     existing = os.environ.get('PATH', '')
     os.environ['PATH'] = os.pathsep.join([path for path in candidates if path and Path(path).is_dir()] + [existing])
 

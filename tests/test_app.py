@@ -1,9 +1,12 @@
 import tempfile
 import unittest
+import os
+import sys
 from datetime import date, datetime
 from pathlib import Path
+from unittest.mock import patch
 import app
-from desktop_launcher import storage_directory
+from desktop_launcher import add_ocr_paths, storage_directory
 
 
 class LedgerTests(unittest.TestCase):
@@ -311,6 +314,17 @@ class LedgerTests(unittest.TestCase):
             storage_directory('win32', Path('C:/Users/Sancakli'), 'D:/LocalData'),
             Path('D:/LocalData') / 'Sancakli Market',
         )
+
+    def test_windows_launcher_uses_installed_turkish_ocr_data(self):
+        with tempfile.TemporaryDirectory() as directory:
+            language_directory = Path(directory) / 'Sancakli Market' / 'tessdata'
+            language_directory.mkdir(parents=True)
+            with patch.object(sys, 'platform', 'win32'), patch.dict(
+                os.environ, {'LOCALAPPDATA': directory, 'PATH': ''}, clear=False
+            ):
+                os.environ.pop('TESSDATA_PREFIX', None)
+                add_ocr_paths()
+                self.assertEqual(os.environ['TESSDATA_PREFIX'], str(language_directory))
 
 
 if __name__ == '__main__':
