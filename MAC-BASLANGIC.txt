@@ -1,16 +1,17 @@
 SANCAKLI MARKET — MAC BAŞLANGIÇ PAKETİ
 Kaliteli Ürün, Güvenilir Hizmet
 
-Bu paket, masaüstü kurulumunun ilk yerel sürümüdür. Yerel uygulama
-Safari/Chrome içinde açılır; internet sitesi veya sunucu aboneliği gerekmez.
-Henüz bağımsız, imzalı bir .app uygulaması değildir.
+Yerel uygulama Safari/Chrome içinde açılır; internet sitesi veya sunucu
+aboneliği gerekmez. Mac-Uygulamasini-Olustur.command dosyası bağımsız
+Sancakli Market.app paketini bu Mac üzerinde oluşturur ve yerel olarak imzalar.
 
 1. ZIP dosyasını açın. Çıkan Sancakli-Market-Mac klasörünü Belgeler'e taşıyın.
-2. Klasördeki Sancakli-Market.command dosyasına çift tıklayın.
+2. İlk kurulum için Mac-Uygulamasini-Olustur.command dosyasına çift tıklayın.
 3. Python eksik uyarısı varsa https://www.python.org/downloads/macos/
    adresindeki resmi macOS yükleyicisiyle Python 3.11+ kurun, tekrar deneyin.
-4. Bir Terminal penceresi ve tarayıcı açılır. Terminal'i kullanım boyunca
-   açık tutun. Kapatmak için Terminal penceresinde Control + C kullanın.
+4. Kurulum bitince uygulama açılır. Sonraki kullanımlarda Uygulamalar
+   klasöründeki Sancakli Market simgesine çift tıklayın. Küçük kontrol
+   penceresindeki Uygulamayı Kapat düğmesi programı güvenle kapatır.
 5. Firmalar bölümünden başlayın. Bu pakette gerçek veya örnek cari kayıt yoktur.
 
 Dosya açılamıyorsa:
@@ -41,8 +42,9 @@ aktarır. Fatura dosyası ekle düğmesiyle PDF veya fotoğraf sayfalarını tek
 kontrol ederek onaylayın. Farklı tablo düzenleri eksik okunabilir.
 
 BU PAKETİN TEST DURUMU
-Hesaplama testleri ve tarayıcı akışları Linux geliştirme ortamında doğrulandı.
-Mac üzerinde açılış henüz denenmedi; ilk açılışı birlikte kontrol edeceğiz.
+Hesaplama testleri ve yerel sunucu akışları Linux geliştirme ortamında
+doğrulandı. .app paketi Mac üzerinde oluşturulur; ilk kurulumu birlikte
+kontrol edeceğiz.
 
 ÜRÜNLERİ KONTROL ETME
 Ürün adı, kodu, miktarı ve birimi ayrı alanlardır. Fiyatlar iki ondalıkla

@@ -3,6 +3,7 @@ import unittest
 from datetime import date, datetime
 from pathlib import Path
 import app
+from desktop_launcher import storage_directory
 
 
 class LedgerTests(unittest.TestCase):
@@ -299,6 +300,17 @@ class LedgerTests(unittest.TestCase):
         self.assertEqual(item['product'], 'BENİMO ÇİKOLATALI 80GX18KL')
         self.assertEqual(item['code'], '3532900')
         self.assertEqual((item['quantity'], item['line_total'], item['vat']), ('18', '497.16', '4.97'))
+
+    def test_desktop_launcher_uses_separate_mac_and_windows_data_folders(self):
+        home = Path('/Users/sancakli')
+        self.assertEqual(
+            storage_directory('darwin', home),
+            home / 'Library' / 'Application Support' / 'Sancakli Market',
+        )
+        self.assertEqual(
+            storage_directory('win32', Path('C:/Users/Sancakli'), 'D:/LocalData'),
+            Path('D:/LocalData') / 'Sancakli Market',
+        )
 
 
 if __name__ == '__main__':

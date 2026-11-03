@@ -15,6 +15,14 @@ Sunucu yalnızca `127.0.0.1:8000` üzerinde çalışır. `PORT` değişkeniyle p
 Kullanıcı girişi henüz bulunmadığından bu geliştirme sunucusunu internete açmayın.
 Telefon üzerinden gerçek kullanım için kimlik doğrulama ve HTTPS ile yayınlama ayrıca hazırlanmalıdır.
 
+## Çift tıklamayla masaüstünden açma
+
+Mac’te `Mac-Uygulamasini-Olustur.command` dosyasına çift tıklayın. İlk çalıştırma PyInstaller’ı güvenli Python paket kaynağından indirip uygulamayı bu Mac üzerinde oluşturur, yerel olarak imzalar ve `~/Applications/Sancakli Market.app` konumuna kurar. Bundan sonraki açılışlarda Finder’daki Uygulamalar klasöründen **Sancakli Market** simgesine çift tıklayın. Küçük kontrol penceresi tarayıcıyı otomatik açar; işi bitirince **Uygulamayı Kapat** düğmesini kullanın. Güncelleme sonrası oluşturma dosyasını yeniden çalıştırmak mevcut kayıtları silmez.
+
+Windows bilgisayarda depo klasöründeki `Windows-Uygulamasini-Olustur.ps1` dosyasını PowerShell ile çalıştırın. Dosya Windows üzerinde tek bir `Sancakli-Market.exe` üretir, `%LOCALAPPDATA%\Programs\Sancakli Market` içine kurar ve masaüstü ile Başlat menüsüne **Sancaklı Market** kısayolu ekler. Windows paketi Windows bilgisayarda oluşturulmalıdır. İlk paket hazırlanırken Python 3.11+ ve internet bağlantısı gerekir; sonraki normal açılışlarda Python komutu kullanılmaz.
+
+Masaüstü paketleri veriyi uygulama dosyasının içinde tutmaz. Mac verisi `~/Library/Application Support/Sancakli Market`, Windows verisi `%LOCALAPPDATA%\Sancakli Market` altında kalır. Uygulamayı güncellemek kayıtları değiştirmez. Fotoğraf ve taranmış PDF okuması için Tesseract bilgisayarda ayrıca kurulu olmalıdır; yazı katmanlı dijital PDF okuması ve diğer cari işlemler uygulama paketinde çalışır.
+
 ## Kullanım
 
 1. Firmalar bölümünde tedarikçiyi kaydedin.
