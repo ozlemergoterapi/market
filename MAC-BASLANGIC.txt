@@ -7,8 +7,9 @@ Sancakli Market.app paketini bu Mac üzerinde oluşturur ve yerel olarak imzalar
 
 1. ZIP dosyasını açın. Çıkan Sancakli-Market-Mac klasörünü Belgeler'e taşıyın.
 2. İlk kurulum için Mac-Uygulamasini-Olustur.command dosyasına çift tıklayın.
-3. Python eksik uyarısı varsa https://www.python.org/downloads/macos/
-   adresindeki resmi macOS yükleyicisiyle Python 3.11+ kurun, tekrar deneyin.
+3. Kurulum Homebrew, Python, masaüstü pencere desteği, Tesseract ve Türkçe
+   okuma paketi eksikse kendisi indirir. macOS parola veya yönetici onayı
+   isterse izin verin. Ayrı bir program arayıp indirmeniz gerekmez.
 4. Kurulum bitince uygulama açılır. Sonraki kullanımlarda Uygulamalar
    klasöründeki Sancakli Market simgesine çift tıklayın. Küçük kontrol
    penceresindeki Uygulamayı Kapat düğmesi programı güvenle kapatır.
@@ -34,8 +35,7 @@ durum ayrıca yedeklenir ve seçilen dosyanın bütünlüğü kontrol edilir.
 
 FOTOĞRAF OKUMA
 Temel cari, ödeme ve fiyat karşılaştırma işlemleri internetsiz çalışır.
-Fotoğraftan yazı okuma için ayrıca Tesseract gerekir; bu pakette motor yoktur.
-Motor kurulu değilse fatura fotoğrafı saklanabilir ve bilgiler elle girilir.
+İlk kurulum Tesseract motorunu ve Türkçe okuma paketini otomatik hazırlar.
 Faturayı oku ve alanları doldur düğmesi okunabilen bilgileri taslak olarak
 aktarır. Fatura dosyası ekle düğmesiyle PDF veya fotoğraf sayfalarını tek tek de ekleyebilirsiniz;
 önceki sayfalar korunur. Tüm sayfaları ekledikten sonra okutun, vade girin, alanları ve ürünleri
