@@ -78,6 +78,12 @@ Fatura Tarihi:
         self.assertEqual(draft['items'][0]['quantity'],'18')
         self.assertIn('96GX24',draft['items'][0]['product'])
 
+    def test_product_description_number_is_not_a_row_number(self):
+        draft=parse_invoice('''1 8223298 HOSBES MUZLU KR.GOF.
+120GX20KL 10 Adet 47,5200 TL % 1,00 4,48 TL 447,76 TL''')
+        self.assertEqual(draft['import_check']['expected_rows'],[1])
+        self.assertEqual(len(draft['items']),1)
+
     def test_fractional_and_grouped_quantities(self):
         for quantity,net,expected in [('1,25','1,25','1.25'),('1.000','1.000,00','1000')]:
             with self.subTest(quantity=quantity):

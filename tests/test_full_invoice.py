@@ -92,6 +92,17 @@ class FullInvoiceTests(unittest.TestCase):
         self.assertTrue(any('1. ürün satırı' in warning and 'çelişkili' in warning for warning in merged['warnings']))
         self.assertTrue(any('Eksik fatura kalemleri: 1.' in error for error in merged['coverage']['errors']))
 
+    def test_repeated_matching_layouts_win_over_one_damaged_reading(self):
+        correct = parse_invoice(row_text(ROWS[0]) + '\nÖdenecek Tutar 474,82 TL')
+        changed = list(ROWS[0])
+        changed[3] = 180
+        damaged = parse_invoice(row_text(tuple(changed)) + '\nÖdenecek Tutar 474,82 TL')
+
+        merged = merge_readings([correct, correct, damaged])
+
+        self.assertEqual([item['row_number'] for item in merged['items']], [1])
+        self.assertTrue(any('birden fazla aynı çıkan' in warning for warning in merged['warnings']))
+
     def test_conflicting_overlap_inside_one_reading_is_not_hidden(self):
         changed = list(ROWS[0])
         changed[6] = '470.12'

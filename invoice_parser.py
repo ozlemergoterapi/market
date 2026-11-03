@@ -54,7 +54,7 @@ def _item_score(item):
     return sum(bool(str(item.get(key, '')).strip()) for key in fields), len(str(item.get('product', '')).strip()), not bool(item.get('review'))
 
 
-def _consolidate_items(items, invalid_rows=()):
+def _consolidate_items(items, invalid_rows=(), allow_consensus=False):
     """Merge repeated page/OCR rows only when their invoice evidence agrees."""
     grouped = {}
     for item in items:
@@ -64,10 +64,19 @@ def _consolidate_items(items, invalid_rows=()):
     for row_number in sorted(set(grouped) | invalid_rows):
         candidates = grouped.get(row_number, [])
         identities = {_item_identity(item) for item in candidates}
-        if row_number in invalid_rows or not candidates or None in identities or len(identities) != 1:
+        if row_number in invalid_rows or not candidates or None in identities:
             warnings.append(f'{row_number}. ürün satırı OCR okumalarında çelişkili veya eksik çıktı; otomatik doldurulmadı.')
             continue
-        consolidated.append(max(candidates, key=_item_score))
+        selected = candidates
+        if len(identities) != 1:
+            counts = {identity: sum(_item_identity(item) == identity for item in candidates) for identity in identities}
+            ordered = sorted(counts.items(), key=lambda entry: entry[1], reverse=True)
+            if not allow_consensus or ordered[0][1] < 2 or ordered[0][1] == ordered[1][1]:
+                warnings.append(f'{row_number}. ürün satırı OCR okumalarında çelişkili veya eksik çıktı; otomatik doldurulmadı.')
+                continue
+            selected = [item for item in candidates if _item_identity(item) == ordered[0][0]]
+            warnings.append(f'{row_number}. ürün satırı farklı OCR düzenlerinde değişik okundu; birden fazla aynı çıkan okuma kullanıldı ve faturayla kontrol edilmeli.')
+        consolidated.append(max(selected, key=_item_score))
     return consolidated, warnings
 
 
@@ -212,7 +221,17 @@ def parse_invoice(text, firms=()):
     result['items'], duplicate_warnings = _consolidate_items(parsed_items, invalid_rows)
     result['warnings'].extend(duplicate_warnings)
     result['warnings'].extend('Ürün kodu '+item['code']+': '+item['review'] for item in result['items'] if item.get('review'))
-    detected = {int(m[1]) for line in lines if (m:=re.match(r'^(\d{1,3})\s+[A-Z0-9]{4,}\b',line,re.I)) and 1<=int(m[1])<=500}
+    # A row starts with a sequence number followed by a numeric product code.
+    # Product descriptions can also begin with values such as "120 GX20KL";
+    # requiring at least five digits in the code prevents those continuations
+    # from inflating the expected row count.
+    detected = set()
+    for line in lines:
+        match = re.match(r'^(\d{1,3})\s+([A-Z0-9]{5,14})\b', line, re.I)
+        if match and sum(character.isdigit() for character in match[2]) >= 5:
+            row_number = int(match[1])
+            if 1 <= row_number <= 500:
+                detected.add(row_number)
     expected = list(range(1,max(detected)+1)) if detected else []
     result['import_check'] = {'expected_rows':expected}
     result['coverage'] = check_items(result['items'],result['total'],result['import_check'])
@@ -291,7 +310,7 @@ def merge_readings(readings):
     expected=sorted({n for r in readings for n in r.get('import_check',{}).get('expected_rows',[])})
     result['import_check']={'expected_rows':expected}
     candidates=[item for reading in readings for item in reading.get('items',[])]
-    result['items'], item_warnings = _consolidate_items(candidates)
+    result['items'], item_warnings = _consolidate_items(candidates, allow_consensus=True)
     result['warnings'].extend(item_warnings)
     result['warnings'].extend(
         warning for reading in readings

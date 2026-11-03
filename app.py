@@ -343,7 +343,15 @@ class Handler(BaseHTTPRequestHandler):
                 return self.respond({'photo': row['photo'] if row else None,'photos':([row['photo']]+json.loads(row['extra_photos'])) if row and row['photo'] else []})
             except ValueError:
                 return self.respond({'error': 'Geçersiz kayıt.'}, 400)
-        files = {'/': ('index.html','text/html'), '/app.js': ('app.js','text/javascript'), '/style.css': ('style.css','text/css'), '/logo.png': ('logo.png','image/png')}
+        files = {
+            '/': ('index.html','text/html'),
+            '/app.js': ('app.js','text/javascript'),
+            '/style.css': ('style.css','text/css'),
+            '/logo.png': ('logo.png','image/png'),
+            '/vendor/pdfjs/pdf.min.mjs': ('vendor/pdfjs/pdf.min.mjs','text/javascript'),
+            '/vendor/pdfjs/pdf.worker.min.mjs': ('vendor/pdfjs/pdf.worker.min.mjs','text/javascript'),
+            '/vendor/pdfjs/LICENSE': ('vendor/pdfjs/LICENSE','text/plain'),
+        }
         if self.path not in files:
             return self.respond({'error':'Bulunamadı.'},404)
         filename, kind = files[self.path]

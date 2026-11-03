@@ -1,4 +1,5 @@
 let state, selectedPhoto = null, selectedPhotos = [], photoLoading = false, activeImportCheck = null;
+let pdfOcrPhotos = new Set();
 const $ = s => document.querySelector(s);
 const esc = x => String(x ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const currency = cents => new Intl.NumberFormat('tr-TR',{style:'currency',currency:'TRY'}).format(cents/100);
@@ -58,10 +59,10 @@ $('#new-firm').onclick=()=>{setMode('firm',null);$('#firm-form').reset();$('#fir
 $('#new-invoice').onclick=()=>{
   if(!state)return;
   if(!state.firms.length){toast('Önce faturanın ait olduğu firmayı ekleyin.');$('[data-tab="firms"]').click();$('#new-firm').click();return;}
-  activeImportCheck=null;ocrGeneration++;setMode('invoice',null);$('#invoice-form').reset();$('#invoice-form .form-error').textContent='';selectedPhoto=null;selectedPhotos=[];
+  activeImportCheck=null;ocrGeneration++;setMode('invoice',null);$('#invoice-form').reset();$('#invoice-form .form-error').textContent='';selectedPhoto=null;selectedPhotos=[];pdfOcrPhotos.clear();
   $('#expected-item-count').required=true;
   [...$('#invoice-form').elements].forEach(e=>{delete e.dataset.userEdited;e.title='';});
-  renderSelectedPhotos();$('#ocr-text').hidden=true;$('#copy-ocr').hidden=true;$('#ocr-review').hidden=true;$('#ocr-status').textContent='Fotoğraf isteğe bağlıdır. Okunan yazılar otomatik kaydedilmez.';
+  renderSelectedPhotos();$('#ocr-text').hidden=true;$('#copy-ocr').hidden=true;$('#ocr-review').hidden=true;$('#ocr-status').textContent='PDF veya fotoğraf isteğe bağlıdır. Okunan yazılar otomatik kaydedilmez.';
   $('#item-rows').innerHTML='';renderImportCheck();$('#due-preview').value='';
   $('#firm-select').innerHTML=state.firms.map(f=>`<option value="${f.id}">${esc(f.name)}</option>`).join('');
   $('#invoice-form [name=issued]').value=state.today;$('#invoice-dialog').showModal();
@@ -90,6 +91,50 @@ $('#add-item').onclick=()=>{
 function photoBytes(value){
   const base64=value.split(',')[1]||'';
   return Math.floor(base64.length*3/4)-(base64.endsWith('==')?2:base64.endsWith('=')?1:0);
+}
+let pdfJsPromise=null;
+function loadPdfJs(){
+  if(!pdfJsPromise)pdfJsPromise=import('/vendor/pdfjs/pdf.min.mjs?v=4.10.38').then(pdfjs=>{
+    pdfjs.GlobalWorkerOptions.workerSrc='/vendor/pdfjs/pdf.worker.min.mjs?v=4.10.38';
+    return pdfjs;
+  });
+  return pdfJsPromise;
+}
+function fileDataUrl(file){
+  return new Promise((resolve,reject)=>{const reader=new FileReader();reader.onload=()=>resolve(reader.result);reader.onerror=()=>reject(new Error('Dosya okunamadı.'));reader.readAsDataURL(file);});
+}
+function isPdfFile(file){return file.type==='application/pdf'||file.name.toLocaleLowerCase('tr').endsWith('.pdf');}
+async function pdfPageImages(file,availablePages){
+  const pdfjs=await loadPdfJs();
+  const loading=pdfjs.getDocument({data:new Uint8Array(await file.arrayBuffer())});
+  let pdfDocument;
+  try{
+    pdfDocument=await loading.promise;
+    if(!pdfDocument.numPages)throw new Error('PDF içinde sayfa bulunamadı.');
+    if(pdfDocument.numPages>availablePages)throw new Error(`PDF ${pdfDocument.numPages} sayfa. Toplam en fazla 6 sayfa ekleyebilirsiniz.`);
+    const pages=[];
+    for(let number=1;number<=pdfDocument.numPages;number++){
+      const page=await pdfDocument.getPage(number),base=page.getViewport({scale:1});
+      const scale=Math.min(2400/base.width,3800/base.height);
+      const viewport=page.getViewport({scale});
+      const canvas=document.createElement('canvas');canvas.width=Math.ceil(viewport.width);canvas.height=Math.ceil(viewport.height);
+      const context=canvas.getContext('2d',{alpha:false});
+      if(!context)throw new Error('PDF sayfası görüntüye çevrilemedi.');
+      context.fillStyle='#fff';context.fillRect(0,0,canvas.width,canvas.height);
+      await page.render({canvasContext:context,viewport}).promise;
+      // Keep the PDF render lossless. A second JPEG conversion before OCR can
+      // erase thin table characters and cause otherwise readable rows to vanish.
+      pages.push(canvas.toDataURL('image/png'));
+      page.cleanup();
+    }
+    return pages;
+  }catch(error){
+    if(error?.name==='PasswordException')throw new Error('Şifreli PDF açılamıyor. Şifresiz bir kopyasını ekleyin.');
+    if(error?.name==='InvalidPDFException')throw new Error('PDF dosyası bozuk veya geçersiz.');
+    throw error;
+  }finally{
+    if(pdfDocument)await pdfDocument.destroy();else await loading.destroy();
+  }
 }
 function loadOcrImage(photo){
   return new Promise((resolve,reject)=>{
@@ -182,12 +227,18 @@ function renderOcrRegion(image,region){
   if(!prepared.startsWith('data:image/jpeg;base64,'))throw new Error('Fotoğraf dönüştürülemedi.');
   return prepared;
 }
-async function prepareOcrPhotos(photos){
+async function prepareOcrPhotos(photos,includeOriginals=false){
   try{
     const prepared=[];
     for(const photo of photos){
       const image=await loadOcrImage(photo);
       for(const region of ocrDocumentBands(image))prepared.push(renderOcrRegion(image,region));
+    }
+    // Two complementary readings recover thin characters that can disappear
+    // during contrast preparation (for example a row number inside a grid).
+    if(includeOriginals){
+      const combined=[...photos,...prepared.filter(photo=>!photos.includes(photo))];
+      if(combined.length<=6&&combined.reduce((sum,p)=>sum+photoBytes(p),0)<=8*1024*1024)return combined;
     }
     if(prepared.length&&prepared.length<=6&&prepared.reduce((sum,p)=>sum+photoBytes(p),0)<=8*1024*1024)return prepared;
     const fullPages=[];
@@ -204,20 +255,21 @@ async function prepareOcrPhotos(photos){
 function renderSelectedPhotos(){
   selectedPhoto=selectedPhotos[0]||null;
   $('#photo-previews').innerHTML=selectedPhotos.map((photo,index)=>`<article class="photo-page"><img src="${esc(photo)}" alt="Fatura sayfa ${index+1}"><div><strong>Sayfa ${index+1}</strong><button type="button" data-remove-photo="${index}" aria-label="Sayfa ${index+1} fotoğrafını kaldır" class="delete-button">Kaldır</button></div></article>`).join('');
-  $('#photo-count').textContent=selectedPhotos.length?selectedPhotos.length+' fotoğraf eklendi · En fazla 6 sayfa, toplam 8 MB.':'';
+  $('#photo-count').textContent=selectedPhotos.length?selectedPhotos.length+' sayfa eklendi · En fazla 6 sayfa, toplam 8 MB.':'';
 }
 function photoSelectionChanged(){
   ocrGeneration++;
   $('.confirm input').checked=false;
   $('#ocr-text').hidden=true;$('#copy-ocr').hidden=true;$('#ocr-review').hidden=true;
   renderSelectedPhotos();
-  $('#ocr-status').textContent=selectedPhotos.length+' fotoğraf eklendi. Tüm sayfaları okumak için “Fotoğrafı oku ve alanları doldur” düğmesine basın. Önceden doldurulmuş alanları yeniden kontrol edin.';
+  $('#ocr-status').textContent=selectedPhotos.length+' sayfa eklendi. Tüm sayfaları okumak için “Faturayı oku ve alanları doldur” düğmesine basın. Önceden doldurulmuş alanları yeniden kontrol edin.';
 }
 $('#add-photo').onclick=()=>$('#photo').click();
 $('#photo-previews').onclick=e=>{
   const button=e.target.closest('[data-remove-photo]');
   if(!button||photoLoading||$('#read-photo').disabled)return;
-  selectedPhotos.splice(Number(button.dataset.removePhoto),1);
+  const [removed]=selectedPhotos.splice(Number(button.dataset.removePhoto),1);
+  pdfOcrPhotos.delete(removed);
   photoSelectionChanged();
 };
 $('#photo').onchange=async e=>{
@@ -225,32 +277,48 @@ $('#photo').onchange=async e=>{
   if(!files.length)return;
   if(photoLoading||$('#read-photo').disabled){$('#ocr-status').textContent='Devam eden fotoğraf işleminin bitmesini bekleyin.';return;}
   const existingBytes=selectedPhotos.reduce((sum,p)=>sum+photoBytes(p),0);
-  if(selectedPhotos.length+files.length>6||existingBytes+files.reduce((sum,f)=>sum+f.size,0)>8*1024*1024||files.some(f=>!['image/jpeg','image/png','image/webp'].includes(f.type))){$('#ocr-status').textContent='Eklenemedi. Toplam en fazla 6 JPEG/PNG/WebP ve 8 MB olabilir. Mevcut fotoğraflarınız korundu.';return;}
+  const imageTypes=['image/jpeg','image/png','image/webp'];
+  if(existingBytes+files.reduce((sum,f)=>sum+f.size,0)>8*1024*1024||files.some(file=>!isPdfFile(file)&&!imageTypes.includes(file.type))){$('#ocr-status').textContent='Eklenemedi. PDF, JPEG, PNG veya WebP seçin; toplam dosya boyutu en fazla 8 MB olabilir. Mevcut sayfalarınız korundu.';return;}
   const generation=ocrGeneration;
   photoLoading=true;$('#add-photo').disabled=true;$('#read-photo').disabled=true;
   try{
-    const added=await Promise.all(files.map(file=>new Promise((resolve,reject)=>{const reader=new FileReader();reader.onload=()=>resolve(reader.result);reader.onerror=reject;reader.readAsDataURL(file);})));
+    const added=[];const addedPdfPages=new Set();let pdfPages=0;
+    for(const file of files){
+      if(isPdfFile(file)){
+        $('#ocr-status').textContent=`${file.name} PDF sayfaları hazırlanıyor…`;
+        const pages=await pdfPageImages(file,6-selectedPhotos.length-added.length);
+        added.push(...pages);pages.forEach(page=>addedPdfPages.add(page));pdfPages+=pages.length;
+      }else{
+        if(selectedPhotos.length+added.length>=6)throw new Error('Toplam en fazla 6 sayfa ekleyebilirsiniz.');
+        added.push(await fileDataUrl(file));
+      }
+    }
     if(generation!==ocrGeneration||!$('#invoice-dialog').open)return;
-    let duplicate=false;
-    for(const photo of added){if(selectedPhotos.includes(photo)){duplicate=true;}else{selectedPhotos.push(photo);}}
+    let duplicate=false;const unique=[];
+    for(const photo of added){if(selectedPhotos.includes(photo)||unique.includes(photo)){duplicate=true;}else{unique.push(photo);}}
+    if(selectedPhotos.length+unique.length>6)throw new Error('Toplam en fazla 6 sayfa ekleyebilirsiniz.');
+    if(existingBytes+unique.reduce((sum,p)=>sum+photoBytes(p),0)>8*1024*1024)throw new Error('PDF sayfaları görüntüye çevrildiğinde 8 MB sınırını aşıyor. Daha küçük bir PDF deneyin.');
+    selectedPhotos.push(...unique);
+    unique.filter(photo=>addedPdfPages.has(photo)).forEach(photo=>pdfOcrPhotos.add(photo));
     photoSelectionChanged();
-    if(duplicate)$('#ocr-status').textContent+=' Aynı fotoğraf tekrar eklenmedi.';
-  }catch{$('#ocr-status').textContent='Fotoğraf yüklenemedi. Mevcut fotoğraflarınız korundu.';}
+    if(pdfPages)$('#ocr-status').textContent+=` PDF içinden ${pdfPages} sayfa hazırlandı.`;
+    if(duplicate)$('#ocr-status').textContent+=' Aynı sayfa tekrar eklenmedi.';
+  }catch(error){$('#ocr-status').textContent=(error?.message||'Dosya yüklenemedi.')+' Mevcut sayfalarınız korundu.';}
   finally{photoLoading=false;$('#add-photo').disabled=false;$('#read-photo').disabled=false;}
 };
 
 let ocrGeneration=0;
 $('#read-photo').onclick=async()=>{
   if(photoLoading)return;
-  if(!selectedPhoto){$('#ocr-status').textContent='Önce bir fotoğraf seçin.';return;}
+  if(!selectedPhoto){$('#ocr-status').textContent='Önce PDF veya fotoğraf ekleyin.';return;}
   const form=$('#invoice-form');
-  if((form.elements.number.value||form.elements.total.value||$('#item-rows').children.length)&&!window.confirm('Fotoğraftan okunan bilgiler bu formdaki tarih, numara, toplam, firma ve ürünlerin yerine yazılacak. Kaydettiğiniz kayıt değişmez; önce kontrol edeceksiniz. Devam edilsin mi?'))return;
+  if((form.elements.number.value||form.elements.total.value||$('#item-rows').children.length)&&!window.confirm('Dosyadan okunan bilgiler bu formdaki tarih, numara, toplam, firma ve ürünlerin yerine yazılacak. Kaydettiğiniz kayıt değişmez; önce kontrol edeceksiniz. Devam edilsin mi?'))return;
   const generation=++ocrGeneration, requestedPhoto=selectedPhoto;
-  $('#read-photo').disabled=true;$('#add-photo').disabled=true;$('#ocr-status').textContent='Fotoğraf okunuyor ve fatura alanları hazırlanıyor…';
+  $('#read-photo').disabled=true;$('#add-photo').disabled=true;$('#ocr-status').textContent='Fatura okunuyor ve alanlar hazırlanıyor…';
   form.querySelector('button.primary').disabled=true;
   try{
     const originalPhotos=selectedPhotos.length?selectedPhotos:[requestedPhoto];
-    const ocrPhotos=await prepareOcrPhotos(originalPhotos);
+    const ocrPhotos=await prepareOcrPhotos(originalPhotos,originalPhotos.every(photo=>pdfOcrPhotos.has(photo)));
     if(generation!==ocrGeneration||selectedPhoto!==requestedPhoto||!$('#invoice-dialog').open)return;
     const result=await api('ocr',{photos:ocrPhotos});
     if(generation!==ocrGeneration||selectedPhoto!==requestedPhoto||!$('#invoice-dialog').open)return;
@@ -296,7 +364,7 @@ document.addEventListener('click',async e=>{
 for(const [id,path] of [['firm','firms'],['invoice','invoices'],['payment','payments']]){
   $('#'+id+'-form').onsubmit=async e=>{
     e.preventDefault();const form=e.target,button=form.querySelector('button.primary'),error=form.querySelector('.form-error');error.textContent='';
-    if((photoLoading||$('#read-photo').disabled)&&id==='invoice'){error.textContent='Fotoğrafın yüklenmesini bekleyin.';return;}
+    if((photoLoading||$('#read-photo').disabled)&&id==='invoice'){error.textContent='Fatura dosyasının hazırlanmasını bekleyin.';return;}
     const data=Object.fromEntries(new FormData(form));
     if(id==='invoice'){data.photo=selectedPhotos.length?null:selectedPhoto;data.photos=selectedPhotos;data.items=[...document.querySelectorAll('.item-row')].map(r=>({product:r.querySelector('.product').value,unit:r.querySelector('.unit').value,price:r.querySelector('.price').value,quantity:r.querySelector('.quantity').value,code:r.querySelector('.code').value,net:r.dataset.sourceNet||null,vat:r.dataset.sourceVat||null,row_number:r.querySelector('.row-number').value,line_total:r.querySelector('.line-total').value}));}
     if(id==='invoice'){const errors=renderImportCheck();data.import_check=activeImportCheck;if(errors.length){error.textContent='Eksik veya tutarsız ürünlerle kaydedilemez. '+errors.join(' ');return;}}
@@ -332,8 +400,8 @@ document.addEventListener('click',async e=>{
     renderImportCheck();
     if(i.has_photo){
       photoLoading=true;form.querySelector('button.primary').disabled=true;
-      try{const r=await api('photo/'+i.id);selectedPhotos=r.photos||[r.photo];renderSelectedPhotos();}
-      catch(error){form.closest('dialog').close();toast('Fotoğraf yüklenemedi. Kaydı yeniden açın.');}
+      try{const r=await api('photo/'+i.id);selectedPhotos=r.photos||[r.photo];pdfOcrPhotos.clear();renderSelectedPhotos();}
+      catch(error){form.closest('dialog').close();toast('Fatura sayfaları yüklenemedi. Kaydı yeniden açın.');}
       finally{photoLoading=false;form.querySelector('button.primary').disabled=false;}
     }
   }
