@@ -10,8 +10,8 @@ Sancakli Market.app paketini bu Mac üzerinde oluşturur ve yerel olarak imzalar
 3. Kurulum Homebrew, Python, masaüstü pencere desteği, Tesseract ve Türkçe
    okuma paketi eksikse kendisi indirir. macOS parola veya yönetici onayı
    isterse izin verin. Ayrı bir program arayıp indirmeniz gerekmez.
-4. Kurulum bitince uygulama açılır. Sonraki kullanımlarda Uygulamalar
-   klasöründeki Sancakli Market simgesine çift tıklayın. Küçük kontrol
+4. Kurulum bitince uygulama açılır ve masaüstüne Sancakli Market kısayolu
+   eklenir. Sonraki kullanımlarda masaüstündeki simgeye çift tıklayın. Küçük kontrol
    penceresindeki Uygulamayı Kapat düğmesi programı güvenle kapatır.
 5. Firmalar bölümünden başlayın. Bu pakette gerçek veya örnek cari kayıt yoktur.
 

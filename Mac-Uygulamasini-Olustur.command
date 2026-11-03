@@ -111,8 +111,19 @@ fi
 ditto "dist/Sancakli Market.app" "$target"
 codesign --force --deep --sign - "$target"
 
+desktop_shortcut="$HOME/Desktop/Sancakli Market.app"
+if [ -L "$desktop_shortcut" ]; then
+  rm "$desktop_shortcut"
+fi
+if [ ! -e "$desktop_shortcut" ]; then
+  ln -s "$target" "$desktop_shortcut"
+  echo 'Masaüstü Sancakli Market kısayolu oluşturuldu.'
+else
+  echo 'Masaüstünde aynı adlı başka bir dosya bulundu; üzerine yazılmadı.'
+fi
+
 echo
 echo 'Kurulum tamamlandı: ~/Applications/Sancakli Market.app'
-echo 'Bundan sonra uygulamayı çift tıklayarak açabilirsiniz.'
+echo 'Bundan sonra masaüstündeki simgeye çift tıklayarak açabilirsiniz.'
 open "$target"
 
