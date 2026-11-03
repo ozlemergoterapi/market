@@ -13,6 +13,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from zoneinfo import ZoneInfo
 from invoice_parser import parse_invoice, check_items, merge_readings
+from invoice_ocr import parse_tsv_table
 from product_matching import compare_items, identity as product_identity
 
 ROOT = Path(__file__).resolve().parent
@@ -85,6 +86,44 @@ def photo(value):
     if len(raw) > 8 * 1024 * 1024:
         raise ValueError('Fotoğraf en fazla 8 MB olabilir.')
     return value
+
+
+def tsv_reading(tsv_text):
+    """Adapt coordinate-based OCR rows to the normal invoice reading shape."""
+    table = parse_tsv_table(tsv_text)
+    return dict(
+        number='', issued='', total='', supplier='', firm_id=None,
+        items=table['items'], warnings=[], table_warnings=table['warnings'],
+        sources={}, import_check={'expected_rows': table['expected_rows']},
+    )
+
+
+def run_tesseract(pic, lang, mode, with_tsv=True):
+    """Read one prepared document region, optionally retaining word positions."""
+    match = re.match(r'^data:image/(jpeg|png|webp);base64,', pic)
+    if not match:
+        raise ValueError('Fotoğraf verisi geçersiz.')
+    suffix = {'jpeg': '.jpg', 'png': '.png', 'webp': '.webp'}[match.group(1)]
+    raw = base64.b64decode(pic.split(',', 1)[1], validate=True)
+    with tempfile.TemporaryDirectory(prefix='sancakli-ocr-') as directory:
+        source = Path(directory) / ('page' + suffix)
+        output = Path(directory) / 'reading'
+        source.write_bytes(raw)
+        command = [
+            'tesseract', str(source), str(output), '-l', lang,
+            '--psm', str(mode), '--dpi', '300',
+            '-c', 'preserve_interword_spaces=1', 'txt',
+        ]
+        if with_tsv:
+            command.append('tsv')
+        read = subprocess.run(command, capture_output=True, text=True, timeout=60)
+        if read.returncode:
+            raise ValueError('Bir fotoğraf okunamadı. Daha net JPEG veya PNG deneyin.')
+        text_path = output.with_suffix('.txt')
+        tsv_path = output.with_suffix('.tsv')
+        text = text_path.read_text(encoding='utf-8', errors='replace') if text_path.exists() else ''
+        tsv = tsv_path.read_text(encoding='utf-8', errors='replace') if with_tsv and tsv_path.exists() else ''
+        return text, tsv
 
 
 def state(today=None):
@@ -375,24 +414,48 @@ class Handler(BaseHTTPRequestHandler):
                 lang = 'tur+eng' if 'tur' in languages.split() else 'eng'
                 with connect() as db:
                     firms = [dict(r) for r in db.execute('SELECT id,name FROM firms')]
-                def read_pages(mode):
-                    texts = []
-                    for pic in photos:
-                        with tempfile.NamedTemporaryFile(suffix='.img') as f:
-                            f.write(base64.b64decode(pic.split(',',1)[1])); f.flush()
-                            read = subprocess.run(['tesseract',f.name,'stdout','-l',lang,'--psm',str(mode)],capture_output=True,text=True,timeout=45)
-                            if read.returncode:
-                                raise ValueError('Bir fotoğraf okunamadı. Daha net JPEG veya PNG deneyin.')
-                            texts.append(read.stdout)
-                    return '\n'.join(texts)
-                text = read_pages(6)
-                draft = parse_invoice(text,firms)
-                if not all(draft[k] for k in ('number','issued','total')) or not draft['items'] or draft['coverage']['errors']:
-                    alternative_text = read_pages(3)
-                    alternative = parse_invoice(alternative_text,firms)
-                    draft=merge_readings([draft,alternative])
-                    text+='\n--- Diğer okuma ---\n'+alternative_text
-                return self.respond({'text':text,'language':lang,'draft':draft})
+                readings, visible_text = [], []
+
+                def add_layout(mode, with_tsv=True):
+                    for index, pic in enumerate(photos, 1):
+                        page_text, page_tsv = run_tesseract(pic, lang, mode, with_tsv)
+                        visible_text.append(f'--- Görsel {index} · OCR düzeni {mode} ---\n{page_text}')
+                        plain = parse_invoice(page_text, firms)
+                        if page_tsv:
+                            positioned = tsv_reading(page_tsv)
+                            positioned_rows = {item['row_number'] for item in positioned['items']}
+                            # Keep plain-text rows only when the coordinate reading
+                            # did not already reconstruct that invoice row.
+                            plain['items'] = [
+                                item for item in plain['items']
+                                if item['row_number'] not in positioned_rows
+                            ]
+                            readings.append(positioned)
+                        readings.append(plain)
+
+                # PSM 4 keeps ruled invoice tables as columns; TSV coordinates put
+                # the cells back into rows. Sparse text is a conservative fallback.
+                add_layout(4)
+                draft = merge_readings(readings)
+                table_errors = [
+                    error for error in draft['coverage']['errors']
+                    if error != 'Fatura toplamı okunamadı veya eksik.'
+                ]
+                if not draft['items'] or table_errors:
+                    add_layout(11)
+                    draft = merge_readings(readings)
+                if not draft['items']:
+                    add_layout(6)
+                    draft = merge_readings(readings)
+                if not all(draft[key] for key in ('number', 'issued', 'total')):
+                    for index, pic in enumerate(photos, 1):
+                        page_text, _ = run_tesseract(pic, lang, 3, False)
+                        visible_text.append(f'--- Görsel {index} · üst bilgi okuması ---\n{page_text}')
+                        readings.append(parse_invoice(page_text, firms))
+                        draft = merge_readings(readings)
+                        if all(draft[key] for key in ('number', 'issued', 'total')):
+                            break
+                return self.respond({'text':'\n'.join(visible_text),'language':lang,'draft':draft})
             else:
                 return self.respond({'error':'Bulunamadı.'},404)
             self.respond({'ok':True},201)

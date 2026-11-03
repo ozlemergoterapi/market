@@ -36,6 +36,41 @@ def parse_date(text):
     return ''
 
 
+def _item_identity(item):
+    """Fields that must agree before two OCR rows can be treated as one row."""
+    try:
+        quantity = Decimal(str(item.get('quantity', ''))).normalize()
+        line_total = Decimal(str(item.get('line_total', ''))).normalize()
+        net = Decimal(str(item.get('net', ''))).normalize()
+        vat = Decimal(str(item.get('vat', ''))).normalize()
+    except InvalidOperation:
+        return None
+    code = re.sub(r'[^A-Z0-9]', '', str(item.get('code', '')).upper())
+    return code, quantity, line_total, net, vat
+
+
+def _item_score(item):
+    fields = ('code', 'product', 'unit', 'price', 'quantity', 'source_price', 'net', 'vat', 'line_total')
+    return sum(bool(str(item.get(key, '')).strip()) for key in fields), len(str(item.get('product', '')).strip()), not bool(item.get('review'))
+
+
+def _consolidate_items(items, invalid_rows=()):
+    """Merge repeated page/OCR rows only when their invoice evidence agrees."""
+    grouped = {}
+    for item in items:
+        grouped.setdefault(int(item['row_number']), []).append(item)
+    invalid_rows = set(invalid_rows)
+    consolidated, warnings = [], []
+    for row_number in sorted(set(grouped) | invalid_rows):
+        candidates = grouped.get(row_number, [])
+        identities = {_item_identity(item) for item in candidates}
+        if row_number in invalid_rows or not candidates or None in identities or len(identities) != 1:
+            warnings.append(f'{row_number}. ürün satırı OCR okumalarında çelişkili veya eksik çıktı; otomatik doldurulmadı.')
+            continue
+        consolidated.append(max(candidates, key=_item_score))
+    return consolidated, warnings
+
+
 def label_kind(line):
     label = normalized(line)
     compact = re.sub(r'[^a-z]', '', label)
@@ -146,10 +181,12 @@ def parse_invoice(text, firms=()):
             current += ' ' + line
     if current:
         blocks.append(current)
-    seen = set()
+    parsed_items, invalid_rows = [], set()
     for block in blocks:
+        row_number = int(block.split()[0])
         match = re.match(r'^\d{1,3}\s+(\d{5,14})\s+(.+?)\s+(\d+(?:[.,]\d+)*)\s*(Adet|Ad\.?|Kg|Koli|Lt|Litre)\s+(.+)', block, re.I)
         if not match:
+            invalid_rows.add(row_number)
             result['warnings'].append('Bir ürün satırı okunamadı; fotoğrafla karşılaştırın.')
             continue
         code, product, quantity, unit, tail = match.groups()
@@ -164,18 +201,17 @@ def parse_invoice(text, firms=()):
             if vat < 0 or net <= 0 or raw_price <= 0:
                 raise ValueError()
             price = ((net + vat) / qty).quantize(Decimal('.01'), rounding=ROUND_HALF_UP)
-            signature = (block.split()[0], code, product, str(qty), str(net), str(vat))
-            if signature in seen:
-                continue
-            seen.add(signature)
             review = ''
             if net > qty*raw_price+Decimal('.10') or net < qty*raw_price*Decimal('.5'):
                 review = 'Miktar ile satır/birim fiyatı arasında büyük fark var. Adet, koli ve iskonto bilgilerini kontrol edin.'
-                result['warnings'].append('Ürün kodu '+code+': '+review)
-            result['items'].append(dict(row_number=int(block.split()[0]), line_total=str(net+vat), review=review, product=product[:200], unit=unit.lower(), price=str(price), code=code,
-                                        quantity=str(qty), source_price=str(raw_price), net=str(net), vat=str(vat)))
+            parsed_items.append(dict(row_number=row_number, line_total=str(net+vat), review=review, product=product[:200], unit=unit.lower(), price=str(price), code=code,
+                                     quantity=str(qty), source_price=str(raw_price), net=str(net), vat=str(vat)))
         except (InvalidOperation, ValueError):
+            invalid_rows.add(row_number)
             result['warnings'].append('Bir ürünün son birim fiyatı hesaplanamadı; elle kontrol edin.')
+    result['items'], duplicate_warnings = _consolidate_items(parsed_items, invalid_rows)
+    result['warnings'].extend(duplicate_warnings)
+    result['warnings'].extend('Ürün kodu '+item['code']+': '+item['review'] for item in result['items'] if item.get('review'))
     detected = {int(m[1]) for line in lines if (m:=re.match(r'^(\d{1,3})\s+[A-Z0-9]{4,}\b',line,re.I)) and 1<=int(m[1])<=500}
     expected = list(range(1,max(detected)+1)) if detected else []
     result['import_check'] = {'expected_rows':expected}
@@ -235,7 +271,7 @@ def check_items(items, total, metadata):
 
 
 def merge_readings(readings):
-    """Use a complete table and headers from separate OCR layouts, without mixing rows."""
+    """Merge complementary OCR layouts, rejecting rows whose evidence conflicts."""
     result=dict(number='',issued='',total='',supplier='',firm_id=None,items=[],warnings=[],sources={})
     for key,label in [('number','Fatura numarası'),('issued','Fatura tarihi'),('total','Fatura toplamı')]:
         values={r[key] for r in readings if r.get(key)}
@@ -254,13 +290,17 @@ def merge_readings(readings):
     result['supplier']=next((r['supplier'] for r in readings if r.get('firm_id')==result['firm_id'] and r.get('supplier')),next((r['supplier'] for r in readings if r.get('supplier')),''))
     expected=sorted({n for r in readings for n in r.get('import_check',{}).get('expected_rows',[])})
     result['import_check']={'expected_rows':expected}
-    def table_score(reading):
-        check=check_items(reading['items'],result['total'],result['import_check'])
-        return not check['errors'],len(reading['items']),-len(check['errors'])
-    chosen=max(readings,key=table_score)
-    result['items']=chosen['items']
+    candidates=[item for reading in readings for item in reading.get('items',[])]
+    result['items'], item_warnings = _consolidate_items(candidates)
+    result['warnings'].extend(item_warnings)
+    result['warnings'].extend(
+        warning for reading in readings
+        for warning in reading.get('table_warnings', [])
+        if not warning.startswith('Eksik fatura kalemleri:')
+    )
     result['coverage']=check_items(result['items'],result['total'],result['import_check'])
     result['warnings'].extend(result['coverage']['errors'])
     result['warnings'].extend(i['review'] for i in result['items'] if i.get('review'))
     result['warnings'].append('Vade gününü girin; ürünleri ve miktarları fotoğrafla kontrol ederek onaylayın.')
+    result['warnings'] = list(dict.fromkeys(result['warnings']))
     return result

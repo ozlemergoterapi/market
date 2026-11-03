@@ -59,6 +59,7 @@ $('#new-invoice').onclick=()=>{
   if(!state)return;
   if(!state.firms.length){toast('Önce faturanın ait olduğu firmayı ekleyin.');$('[data-tab="firms"]').click();$('#new-firm').click();return;}
   activeImportCheck=null;ocrGeneration++;setMode('invoice',null);$('#invoice-form').reset();$('#invoice-form .form-error').textContent='';selectedPhoto=null;selectedPhotos=[];
+  $('#expected-item-count').required=true;
   [...$('#invoice-form').elements].forEach(e=>{delete e.dataset.userEdited;e.title='';});
   renderSelectedPhotos();$('#ocr-text').hidden=true;$('#copy-ocr').hidden=true;$('#ocr-review').hidden=true;$('#ocr-status').textContent='Fotoğraf isteğe bağlıdır. Okunan yazılar otomatik kaydedilmez.';
   $('#item-rows').innerHTML='';renderImportCheck();$('#due-preview').value='';
@@ -89,6 +90,116 @@ $('#add-item').onclick=()=>{
 function photoBytes(value){
   const base64=value.split(',')[1]||'';
   return Math.floor(base64.length*3/4)-(base64.endsWith('==')?2:base64.endsWith('=')?1:0);
+}
+function loadOcrImage(photo){
+  return new Promise((resolve,reject)=>{
+    const image=new Image();
+    image.onload=()=>resolve(image);
+    image.onerror=()=>reject(new Error('Fotoğraf OCR için hazırlanamadı.'));
+    image.src=photo;
+  });
+}
+function longestActiveRun(values,minimum){
+  let best=null,start=-1;
+  for(let index=0;index<=values.length;index++){
+    if(index<values.length&&values[index]){
+      if(start<0)start=index;
+    }else if(start>=0){
+      const run={start,end:index,length:index-start};
+      if(run.length>=minimum&&(!best||run.length>best.length))best=run;
+      start=-1;
+    }
+  }
+  return best;
+}
+function ocrDocumentBands(image){
+  const scanWidth=Math.min(240,image.naturalWidth);
+  const scanHeight=Math.max(1,Math.round(image.naturalHeight*scanWidth/image.naturalWidth));
+  const canvas=document.createElement('canvas');canvas.width=scanWidth;canvas.height=scanHeight;
+  const context=canvas.getContext('2d',{willReadFrequently:true});
+  if(!context)throw new Error('Fotoğraf işlenemedi.');
+  context.drawImage(image,0,0,scanWidth,scanHeight);
+  const pixels=context.getImageData(0,0,scanWidth,scanHeight).data;
+  const rowLight=[];
+  for(let y=0;y<scanHeight;y++){
+    let light=0;
+    for(let x=0;x<scanWidth;x++){
+      const offset=(y*scanWidth+x)*4;
+      if(pixels[offset]*.299+pixels[offset+1]*.587+pixels[offset+2]*.114>=185)light++;
+    }
+    rowLight.push(light/scanWidth);
+  }
+  const windowSize=Math.max(1,Math.round(scanHeight*.004));
+  const activeRows=rowLight.map((value,index)=>{
+    let sum=0,count=0;
+    for(let y=Math.max(0,index-windowSize);y<=Math.min(scanHeight-1,index+windowSize);y++){sum+=rowLight[y];count++;}
+    return sum/count>=.53;
+  });
+  const gapAllowance=Math.max(2,Math.round(scanHeight*.008));
+  const minimumHeight=Math.max(36,Math.round(scanHeight*.085));
+  const rawBands=[];
+  let start=-1,lastActive=-1;
+  for(let y=0;y<=scanHeight;y++){
+    if(y<scanHeight&&activeRows[y]){
+      if(start<0)start=y;
+      lastActive=y;
+    }
+    if(start>=0&&(y===scanHeight||y-lastActive>gapAllowance)){
+      if(lastActive-start+1>=minimumHeight)rawBands.push({top:start,bottom:lastActive+1});
+      start=-1;lastActive=-1;
+    }
+  }
+  if(!rawBands.length)return [{x:0,y:0,width:image.naturalWidth,height:image.naturalHeight}];
+  const scaleX=image.naturalWidth/scanWidth,scaleY=image.naturalHeight/scanHeight;
+  return rawBands.map(band=>{
+    const columnLight=[];
+    for(let x=0;x<scanWidth;x++){
+      let light=0,total=0;
+      for(let y=band.top;y<band.bottom;y++){
+        const offset=(y*scanWidth+x)*4;
+        if(pixels[offset]*.299+pixels[offset+1]*.587+pixels[offset+2]*.114>=185)light++;
+        total++;
+      }
+      columnLight.push(total?light/total>=.38:false);
+    }
+    const column=longestActiveRun(columnLight,Math.round(scanWidth*.42));
+    const left=Math.max(0,(column?column.start:0)-2),right=Math.min(scanWidth,(column?column.end:scanWidth)+2);
+    const top=Math.max(0,band.top-2),bottom=Math.min(scanHeight,band.bottom+2);
+    return {x:Math.floor(left*scaleX),y:Math.floor(top*scaleY),width:Math.ceil((right-left)*scaleX),height:Math.ceil((bottom-top)*scaleY)};
+  });
+}
+function renderOcrRegion(image,region){
+  const scale=Math.min(2400/region.width,5200/region.height);
+  const width=Math.max(1,Math.round(region.width*scale)),height=Math.max(1,Math.round(region.height*scale));
+  const canvas=document.createElement('canvas');canvas.width=width;canvas.height=height;
+  const context=canvas.getContext('2d');
+  if(!context)throw new Error('Fotoğraf işlenemedi.');
+  context.fillStyle='#fff';context.fillRect(0,0,width,height);
+  context.imageSmoothingEnabled=true;context.imageSmoothingQuality='high';
+  if('filter' in context)context.filter='grayscale(1) contrast(1.15)';
+  context.drawImage(image,region.x,region.y,region.width,region.height,0,0,width,height);
+  const prepared=canvas.toDataURL('image/jpeg',.88);
+  if(!prepared.startsWith('data:image/jpeg;base64,'))throw new Error('Fotoğraf dönüştürülemedi.');
+  return prepared;
+}
+async function prepareOcrPhotos(photos){
+  try{
+    const prepared=[];
+    for(const photo of photos){
+      const image=await loadOcrImage(photo);
+      for(const region of ocrDocumentBands(image))prepared.push(renderOcrRegion(image,region));
+    }
+    if(prepared.length&&prepared.length<=6&&prepared.reduce((sum,p)=>sum+photoBytes(p),0)<=8*1024*1024)return prepared;
+    const fullPages=[];
+    for(const photo of photos){
+      const image=await loadOcrImage(photo);
+      fullPages.push(renderOcrRegion(image,{x:0,y:0,width:image.naturalWidth,height:image.naturalHeight}));
+    }
+    if(fullPages.reduce((sum,p)=>sum+photoBytes(p),0)<=8*1024*1024)return fullPages;
+    return photos;
+  }catch{
+    return photos;
+  }
 }
 function renderSelectedPhotos(){
   selectedPhoto=selectedPhotos[0]||null;
@@ -138,7 +249,10 @@ $('#read-photo').onclick=async()=>{
   $('#read-photo').disabled=true;$('#add-photo').disabled=true;$('#ocr-status').textContent='Fotoğraf okunuyor ve fatura alanları hazırlanıyor…';
   form.querySelector('button.primary').disabled=true;
   try{
-    const result=await api('ocr',{photos:selectedPhotos.length?selectedPhotos:[requestedPhoto]});
+    const originalPhotos=selectedPhotos.length?selectedPhotos:[requestedPhoto];
+    const ocrPhotos=await prepareOcrPhotos(originalPhotos);
+    if(generation!==ocrGeneration||selectedPhoto!==requestedPhoto||!$('#invoice-dialog').open)return;
+    const result=await api('ocr',{photos:ocrPhotos});
     if(generation!==ocrGeneration||selectedPhoto!==requestedPhoto||!$('#invoice-dialog').open)return;
     const draft=result.draft;
     $('#ocr-text').value=result.text;$('#ocr-text').hidden=false;$('#copy-ocr').hidden=false;
@@ -149,7 +263,11 @@ $('#read-photo').onclick=async()=>{
     }
     if(draft.firm_id)form.elements.firm_id.value=draft.firm_id;
     $('#due-preview').value='';updateDue();
-    if(draft.import_check)activeImportCheck=draft.import_check;
+    if(draft.import_check){
+      const detectedRows=draft.import_check.expected_rows||[],detectedCount=detectedRows.length?Math.max(...detectedRows):0;
+      activeImportCheck={...draft.import_check,detected_count:detectedCount};
+      $('#expected-item-count').value=detectedCount||'';
+    }
     if(draft.items.length)$('#item-rows').innerHTML='';
     draft.items.forEach(item=>{
       $('#add-item').click();const row=$('#item-rows').lastElementChild;
@@ -181,7 +299,7 @@ for(const [id,path] of [['firm','firms'],['invoice','invoices'],['payment','paym
     if((photoLoading||$('#read-photo').disabled)&&id==='invoice'){error.textContent='Fotoğrafın yüklenmesini bekleyin.';return;}
     const data=Object.fromEntries(new FormData(form));
     if(id==='invoice'){data.photo=selectedPhotos.length?null:selectedPhoto;data.photos=selectedPhotos;data.items=[...document.querySelectorAll('.item-row')].map(r=>({product:r.querySelector('.product').value,unit:r.querySelector('.unit').value,price:r.querySelector('.price').value,quantity:r.querySelector('.quantity').value,code:r.querySelector('.code').value,net:r.dataset.sourceNet||null,vat:r.dataset.sourceVat||null,row_number:r.querySelector('.row-number').value,line_total:r.querySelector('.line-total').value}));}
-    if(id==='invoice'){data.import_check=activeImportCheck;const errors=renderImportCheck();if(errors.length){error.textContent='Eksik veya tutarsız ürünlerle kaydedilemez. '+errors.join(' ');return;}}
+    if(id==='invoice'){const errors=renderImportCheck();data.import_check=activeImportCheck;if(errors.length){error.textContent='Eksik veya tutarsız ürünlerle kaydedilemez. '+errors.join(' ');return;}}
     const editing=form.dataset.editId;
     if(editing)data.id=Number(editing);
     button.disabled=true;
@@ -209,7 +327,7 @@ document.addEventListener('click',async e=>{
   }
   if(invoice){
     const i=state.invoices.find(i=>i.id===Number(invoice.dataset.editInvoice));$('#new-invoice').click();setMode('invoice',i.id);
-    const form=$('#invoice-form');const metadata=JSON.parse(i.import_meta||'{}');activeImportCheck=metadata.expected_rows?metadata:null;form.elements.firm_id.value=i.firm_id;form.elements.number.value=i.number;form.elements.issued.value=i.issued;form.elements.days.value=Math.round((new Date(i.due)-new Date(i.issued))/86400000);form.elements.total.value=(i.total/100).toFixed(2);updateDue();
+    const form=$('#invoice-form');const metadata=JSON.parse(i.import_meta||'{}');activeImportCheck=metadata.expected_rows?metadata:null;form.elements.firm_id.value=i.firm_id;form.elements.number.value=i.number;form.elements.issued.value=i.issued;form.elements.days.value=Math.round((new Date(i.due)-new Date(i.issued))/86400000);form.elements.total.value=(i.total/100).toFixed(2);$('#expected-item-count').value=metadata.expected_rows?.length?Math.max(...metadata.expected_rows):'';$('#expected-item-count').required=Boolean(metadata.expected_rows);updateDue();
     state.items.filter(t=>t.invoice_id===i.id).forEach(t=>{$('#add-item').click();const row=$('#item-rows').lastElementChild;row.querySelector('.product').value=t.product;row.querySelector('.unit').value=t.unit;row.querySelector('.price').value=Number(t.unit_price||t.price/100).toFixed(2);row.querySelector('.row-number').value=t.row_number||'';row.querySelector('.line-total').value=t.line_total||'';row.querySelector('.quantity').value=t.quantity||'';row.querySelector('.code').value=t.code||'';if(t.source_net!==''&&t.source_vat!==''){row.dataset.sourceNet=t.source_net;row.dataset.sourceVat=t.source_vat;const evidence=document.createElement('small');evidence.className='item-evidence';evidence.textContent='Kaynak satır: '+t.source_net+' + KDV '+t.source_vat+' TL';row.append(evidence);}});
     renderImportCheck();
     if(i.has_photo){
@@ -267,9 +385,16 @@ $('#invoice-form').addEventListener('input',event=>{event.target.dataset.userEdi
 
 function renderImportCheck(){
   const panel=$('#item-check');
-  panel.hidden=!activeImportCheck;
-  if(!activeImportCheck)return [];
-  const rows=[...document.querySelectorAll('.item-row')],expected=activeImportCheck.expected_rows||[],numbers=rows.map(r=>Number(r.querySelector('.row-number').value)),errors=[];
+  const countField=$('#expected-item-count'),rawCount=countField.value.trim(),enteredCount=Number(rawCount),countErrors=[];let countNote='';
+  if(rawCount&&Number.isInteger(enteredCount)&&enteredCount>=1&&enteredCount<=500){
+    const detected=Number(activeImportCheck?.detected_count||0);
+    activeImportCheck={...(activeImportCheck||{}),detected_count:detected,expected_rows:Array.from({length:enteredCount},(_,index)=>index+1)};
+    if(enteredCount<detected)countNote=`OCR en büyük sıra numarasını ${detected} okudu; siz ${enteredCount} girdiniz. Faturadaki son sıra numarasını esas alın.`;
+  }else if(rawCount||activeImportCheck){countErrors.push('Faturadaki toplam ürün kalemini 1 ile 500 arasında tam sayı olarak girin.');}
+  panel.hidden=!activeImportCheck&&!rawCount;
+  if(panel.hidden)return [];
+  const rows=[...document.querySelectorAll('.item-row')],expected=activeImportCheck?.expected_rows||[],numbers=rows.map(r=>Number(r.querySelector('.row-number').value)),errors=[...countErrors];
+  rows.forEach(row=>{row.querySelector('.row-number').required=true;row.querySelector('.line-total').required=true;});
   const missing=expected.filter(n=>!numbers.includes(n));
   if(!expected.length)errors.push('Faturanın kalem sayısı belirlenemedi. Yeniden okutun.');
   if(missing.length)errors.push('Eksik sıra no: '+missing.join(', ')+'.');
@@ -284,7 +409,7 @@ function renderImportCheck(){
   const target=Math.round(Number($('#invoice-form [name=total]').value)*100);
   if(!target||Math.abs(total-target)>2)errors.push('Ürün satır toplamları ile fatura toplamı uyuşmuyor.');
   panel.classList.toggle('check-error',errors.length>0);
-  panel.textContent='Faturada beklenen: '+expected.length+' kalem · Listedeki: '+rows.length+' kalem · Satırların toplamı: '+currency(total)+'\n'+(errors.length?errors.join('\n'):'Kalem sayısı ve satır toplamları uyumlu. Ürün adlarını, kodlarını ve miktarları ayrıca fotoğraftan doğrulayın.');
+  panel.textContent='Faturada beklenen: '+expected.length+' kalem · Listedeki: '+rows.length+' kalem · Satırların toplamı: '+currency(total)+'\n'+(countNote?countNote+'\n':'')+(errors.length?errors.join('\n'):'Kalem sayısı ve satır toplamları uyumlu. Ürün adlarını, kodlarını ve miktarları ayrıca fotoğraftan doğrulayın.');
   return errors;
 }
 
