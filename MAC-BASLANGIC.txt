@@ -23,15 +23,18 @@ KAYITLAR
 Veritabanı ZIP klasöründen ayrı tutulur:
 ~/Library/Application Support/Sancakli Market/market.sqlite3
 Yeni paket indirmek mevcut kayıtları silmez. Şimdilik aynı anda tek pencere
-başlatın. Otomatik yedekleme henüz eklenmedi: uygulamayı kapattıktan sonra
-veritabanını güvenli bir yere kopyalayın. Windows'a geçişte bu dosyayı taşırız.
+başlatın. Uygulama her açılışta mevcut veritabanını aşağıdaki klasöre yedekler
+ve son 30 açılış yedeğini saklar:
+~/Library/Application Support/Sancakli Market/backups
+Genel bakış ekranında son yedek adı ve konumu gösterilir. Windows'a geçişte
+asıl market.sqlite3 dosyasını veya bu yedeklerden birini taşırız.
 
 FOTOĞRAF OKUMA
 Temel cari, ödeme ve fiyat karşılaştırma işlemleri internetsiz çalışır.
 Fotoğraftan yazı okuma için ayrıca Tesseract gerekir; bu pakette motor yoktur.
 Motor kurulu değilse fatura fotoğrafı saklanabilir ve bilgiler elle girilir.
-Fotoğrafı oku ve alanları doldur düğmesi okunabilen bilgileri taslak olarak
-aktarır. Fotoğraf ekle düğmesiyle sayfaları tek tek de ekleyebilirsiniz;
+Faturayı oku ve alanları doldur düğmesi okunabilen bilgileri taslak olarak
+aktarır. Fatura dosyası ekle düğmesiyle PDF veya fotoğraf sayfalarını tek tek de ekleyebilirsiniz;
 önceki sayfalar korunur. Tüm sayfaları ekledikten sonra okutun, vade girin, alanları ve ürünleri
 kontrol ederek onaylayın. Farklı tablo düzenleri eksik okunabilir.
 

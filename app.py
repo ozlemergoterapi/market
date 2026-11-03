@@ -20,6 +20,47 @@ ROOT = Path(__file__).resolve().parent
 DB = Path(os.environ.get('MARKET_DB', str(ROOT / 'data/market.sqlite3')))
 
 
+def backup_directory():
+    configured = os.environ.get('MARKET_BACKUP_DIR')
+    return Path(configured) if configured else DB.parent / 'backups'
+
+
+def automatic_backup(now=None, keep=30):
+    """Create a consistent startup snapshot and retain the newest snapshots."""
+    if not DB.exists() or not DB.stat().st_size:
+        return None
+    now = now or datetime.now(ZoneInfo('Europe/Istanbul'))
+    directory = backup_directory()
+    directory.mkdir(parents=True, exist_ok=True)
+    target = directory / ('market-' + now.strftime('%Y-%m-%d_%H-%M-%S') + '.sqlite3')
+    if target.exists():
+        return target
+    temporary = target.with_suffix('.tmp')
+    try:
+        with sqlite3.connect(DB) as source, sqlite3.connect(temporary) as destination:
+            if source.execute('PRAGMA quick_check').fetchone()[0] != 'ok':
+                raise sqlite3.DatabaseError('Veritabanı bütünlük kontrolünden geçemedi.')
+            source.backup(destination)
+        os.replace(temporary, target)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+    backups = sorted(directory.glob('market-*.sqlite3'), key=lambda path: path.name, reverse=True)
+    for old in backups[max(1, int(keep)):]:
+        old.unlink()
+    return target
+
+
+def backup_status():
+    directory = backup_directory()
+    backups = sorted(directory.glob('market-*.sqlite3'), key=lambda path: path.name, reverse=True) if directory.exists() else []
+    return {
+        'directory': str(directory),
+        'latest': backups[0].name if backups else '',
+        'count': len(backups),
+    }
+
+
 def connect():
     DB.parent.mkdir(parents=True, exist_ok=True)
     db = sqlite3.connect(DB)
@@ -156,14 +197,27 @@ def state(today=None):
     names={product_identity(item):item['product'] for item in items}
     match_history=[dict(review,left_name=names.get(review['left_key'],json.loads(review['left_key'])[1]),right_name=names.get(review['right_key'],json.loads(review['right_key'])[1])) for review in product_decisions]
     alerts=[]
+    price_history_groups={}
     for comparison in comparisons:
         item,old=comparison['current'],comparison['previous']
+        history_key=comparison['identity']
+        history_id=hashlib.sha256(history_key.encode()).hexdigest()[:20]
+        group=price_history_groups.setdefault(history_key,dict(id=history_id,firm=item['firm'],unit=item['unit'],code=item.get('code') or old.get('code') or '',product=item['product'],points={}))
+        group['product']=item['product'];group['code']=item.get('code') or group['code']
+        for point in (old,item):
+            group['points'][point['id']]=dict(item_id=point['id'],invoice_id=point['invoice_id'],issued=point['issued'],number=point['number'],product=point['product'],price=point['price'])
         if old['price']!=item['price']:
             fingerprint=hashlib.sha256(json.dumps([comparison['identity'],old['identity'],old['invoice_id'],old['issued'],old['price'],item['identity'],item['invoice_id'],item['issued'],item['price']],ensure_ascii=False).encode()).hexdigest()
-            alerts.append(dict(item,fingerprint=fingerprint,approved=fingerprint in reviews,old_product=old['product'],matched_by=comparison['matched_by'],old_price=old['price'],change=round((item['price']/old['price']-1)*100,2)))
+            alerts.append(dict(item,fingerprint=fingerprint,history_id=history_id,approved=fingerprint in reviews,old_product=old['product'],matched_by=comparison['matched_by'],old_price=old['price'],change=round((item['price']/old['price']-1)*100,2)))
+    price_histories=[]
+    for group in price_history_groups.values():
+        group['points']=sorted(group['points'].values(),key=lambda point:(point['issued'],point['invoice_id'],point['item_id']))
+        if len(group['points'])>1:
+            price_histories.append(group)
+    price_histories.sort(key=lambda group:(group['firm'],group['product']))
     for f in firms:
         f['balance'] = sum(i['remaining'] for i in invoices if i['firm_id'] == f['id'])
-    return dict(today=today.isoformat(), totals=totals, firms=firms, invoices=invoices, payments=payments, items=items, alerts=alerts[::-1],product_suggestions=suggestions,unmatched_products=unmatched,product_match_history=match_history)
+    return dict(today=today.isoformat(), totals=totals, firms=firms, invoices=invoices, payments=payments, items=items, alerts=alerts[::-1],price_histories=price_histories,product_suggestions=suggestions,unmatched_products=unmatched,product_match_history=match_history,backup=backup_status())
 
 
 def audit(db, entity, record_id, before):
@@ -478,6 +532,12 @@ class Handler(BaseHTTPRequestHandler):
 
 
 if __name__ == '__main__':
+    try:
+        created_backup = automatic_backup()
+        if created_backup:
+            print('Otomatik yedek oluşturuldu: ' + str(created_backup), flush=True)
+    except (OSError, sqlite3.Error) as error:
+        print('Otomatik yedek oluşturulamadı: ' + str(error), flush=True)
     init()
     print('Market Cari geliştirme sunucusu: 127.0.0.1:8000',flush=True)
     ThreadingHTTPServer(('127.0.0.1',int(os.environ.get('PORT','8000'))),Handler).serve_forever()

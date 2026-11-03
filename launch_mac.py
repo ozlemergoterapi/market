@@ -13,6 +13,12 @@ def main():
     storage.mkdir(parents=True, exist_ok=True)
     os.environ.setdefault('MARKET_DB', str(storage / 'market.sqlite3'))
     import app
+    try:
+        created_backup = app.automatic_backup()
+        if created_backup:
+            print('Otomatik yedek oluşturuldu: ' + str(created_backup), flush=True)
+    except (OSError, app.sqlite3.Error) as error:
+        print('Otomatik yedek oluşturulamadı: ' + str(error), flush=True)
     app.init()
     server = app.ThreadingHTTPServer(('127.0.0.1', 0), app.Handler)
     address = 'http://127.0.0.1:' + str(server.server_port)

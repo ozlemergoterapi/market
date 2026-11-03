@@ -23,6 +23,8 @@ Telefon üzerinden gerçek kullanım için kimlik doğrulama ve HTTPS ile yayın
 4. İsterseniz PDF veya fotoğraf yükleyin ve yazı okuma düğmesini kullanın. Faturayı oku ve alanları doldur düğmesi, okunabilen tarih, numara, ödenecek toplam, mevcut firma eşleşmesi ve ürün satırlarını taslak olarak doldurur. “Faturadaki toplam ürün kalemi” alanını faturanın son sıra numarasıyla karşılaştırın; tek bir sıra eksikken kayıt engellenir. Vade elle girilir. Bilgileri kontrol edip onaylayın.
 5. Fiyat takibi için ürün kodu, ad, gramaj/ambalaj, miktar ve fiyat birimini kontrol edin. Karşılaştırma aynı firma içinde önce ürün koduyla yapılır; kod yoksa normalleştirilmiş ad ve ambalaj kullanılır. Belirsiz benzer adlar Fiyat değişimleri bölümünde Aynı ürün/Farklı ürün onayına sunulur. Onaylı eşleştirmeler hatırlanır ve Kararı kaldır ile geri alınabilir. Farklı gramaj veya fiyat birimleri sessizce birleştirilmez.
 6. Fatura üzerinden tam veya kısmi ödeme kaydedin. Ödeme ilgili faturadan düşer; fazla ödeme kabul edilmez.
+7. Genel bakıştaki aylık ödeme takviminde önceki ve sonraki ayları inceleyin. Takvim vade tarihindeki kalan borcu firma bazında gösterir ve ödeme kaydedildiğinde güncellenir.
+8. Firmalar bölümündeki Hesap geçmişi düğmesiyle o firmaya ait faturaları, ödemeleri ve kalan cariyi birlikte görüntüleyin. Fiyat değişimleri bölümündeki Fiyat geçmişi düğmesi ürünün tarih sıralı fiyatlarını ve yüzde değişimlerini gösterir.
 
 Günlük özet İstanbul tarihini kullanır. Gelecek 7 gün yarın başlar. Gecikenler yalnızca kalan borcu içerir.
 
@@ -36,8 +38,9 @@ Dosyalar dış servise gönderilmez. PDF sayfaları uygulamanın içinde, bilgis
 
 ## Veri ve yedekleme
 
-Kayıtlar ve fotoğraflar `data/market.sqlite3` dosyasında kalıcı tutulur. Bu klasör Git'e eklenmez.
-Sunucuyu durdurduktan sonra bu dosyayı güvenli bir yere kopyalayarak yedekleyin. `MARKET_DB` ile başka dosya kullanılabilir.
+Kayıtlar ve fotoğraflar `data/market.sqlite3` dosyasında kalıcı tutulur. Mac başlangıç dosyası kullanıldığında asıl veri `~/Library/Application Support/Sancakli Market/market.sqlite3` konumundadır. Bu klasörler Git'e eklenmez. `MARKET_DB` ile başka bir veri dosyası kullanılabilir.
+
+Uygulama her açılışta, mevcut veritabanını değiştirmeden önce SQLite’ın güvenli yedekleme yöntemiyle bir kopya oluşturur. Yedekler asıl veritabanının yanındaki `backups` klasörüne yazılır ve en yeni 30 açılış yedeği saklanır. Genel bakış ekranı son yedek dosyasını ve klasör konumunu gösterir. `MARKET_BACKUP_DIR` ile başka bir yedek klasörü seçilebilir. Yedekleme başarısız olursa uygulama terminalde açık bir hata gösterir ve veritabanını yine açmayı dener.
 Firma adı, faturanın tüm alanları ve ürün satırları, ödeme tutarı/tarihi/ilgili faturası Düzelt düğmeleriyle değiştirilebilir. Önceki kayıtlar edits tablosunda saklanır. Fatura toplamı yapılmış ödemelerin altına indirilemez; önce yanlış ödeme düzeltilmelidir. Firma, fatura ve ödemeler Sil düğmesiyle onay sonrası silinir. Firma/fatura silerken bağlı fatura, ödeme ve ürün satırı sayıları gösterilir ve birlikte silinir. Ödeme silinince borç geri açılır. Silinen kayıtlar denetim geçmişinde tutulur; arayüzden geri alma yoktur. Ürün satırları fatura düzeltme ekranındaki Sil düğmesiyle kaldırılır; fatura toplamı kullanıcı tarafından ayrıca kontrol edilir. Yedek yükleme arayüzü ve dışarıya bildirim gönderme henüz yoktur. Kullanıcının tercihiyle şifreli giriş eklenmemiştir.
 
 Fiyat artış ve düşüşlerinin tamamı (1 kuruş fark dahil) ana ekranda onay bekleyen bildirim olarak gösterilir. Değişimi onayla kontrol edildiğini kaydeder; fatura tutarını veya ödemeleri değiştirmez. Onaylanmış karşılaştırmanın ürün/birim/firma/tarih/fiyat bilgisi değişirse yeniden onay gerekir. Yanlış bilgi Faturayı düzelt ile düzeltilir. Bildirimler uygulama içindedir.
@@ -49,7 +52,7 @@ python3 -m unittest discover -s tests -v
 node --check static/app.js
 ```
 
-Testler geçici veritabanıyla vade, kısmi ödeme, özetler, fiyat karşılaştırması ve hatalı kayıtları doğrular. Gerçek fatura fotoğrafıyla OCR doğruluğu ayrıca kontrol edilmelidir.
+Testler geçici veritabanıyla vade, kısmi ödeme, özetler, otomatik yedekleme, fiyat karşılaştırması ve hatalı kayıtları doğrular. Gerçek fatura fotoğrafıyla OCR doğruluğu ayrıca kontrol edilmelidir.
 
 ## Ürün kalemlerini denetleme
 

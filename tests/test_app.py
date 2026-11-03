@@ -1,6 +1,6 @@
 import tempfile
 import unittest
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 import app
 
@@ -46,8 +46,25 @@ class LedgerTests(unittest.TestCase):
         self.assertEqual(alerts[0]['old_price'],3500)
         self.assertEqual(alerts[0]['price'],3900)
         self.assertEqual(alerts[0]['change'],11.43)
+        history = app.state()['price_histories'][0]
+        self.assertEqual(history['id'],alerts[0]['history_id'])
+        self.assertEqual([point['price'] for point in history['points']],[3500,3900])
         self.invoice(number='OTHER',issued='2026-03-01',items=[dict(product='Marka süt',unit='500 ml / adet',price='20')])
         self.assertEqual(len(app.state()['alerts']),1)
+
+    def test_startup_backup_is_consistent_and_retains_newest_files(self):
+        with app.connect() as db:
+            db.execute("INSERT INTO firms(name) VALUES('Yedek Firma')")
+        first = app.automatic_backup(datetime(2026,1,2,8,0,0),keep=2)
+        with app.sqlite3.connect(first) as backup:
+            self.assertEqual(backup.execute('SELECT COUNT(*) FROM firms').fetchone()[0],2)
+        with app.connect() as db:
+            db.execute("INSERT INTO firms(name) VALUES('Sonradan Eklendi')")
+        app.automatic_backup(datetime(2026,1,2,9,0,0),keep=2)
+        latest = app.automatic_backup(datetime(2026,1,2,10,0,0),keep=2)
+        self.assertFalse(first.exists())
+        self.assertTrue(latest.exists())
+        self.assertEqual(app.backup_status()['count'],2)
 
     def test_invalid_amounts_and_negative_term(self):
         for value in ['NaN','Infinity','0','-1','1.001']:
