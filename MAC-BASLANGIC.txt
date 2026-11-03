@@ -28,6 +28,8 @@ ve son 30 açılış yedeğini saklar:
 ~/Library/Application Support/Sancakli Market/backups
 Genel bakış ekranında son yedek adı ve konumu gösterilir. Windows'a geçişte
 asıl market.sqlite3 dosyasını veya bu yedeklerden birini taşırız.
+Genel bakış ekranından bir yedek geri yüklenebilir. Geri yüklemeden önce mevcut
+durum ayrıca yedeklenir ve seçilen dosyanın bütünlüğü kontrol edilir.
 
 FOTOĞRAF OKUMA
 Temel cari, ödeme ve fiyat karşılaştırma işlemleri internetsiz çalışır.

@@ -166,13 +166,13 @@ def parse_invoice(text, firms=()):
     supplier = normalized(result['supplier'])
     supplier_words = re.findall(r'[a-z0-9]+',supplier)
     generic = {'gida','ltd','sti','san','tic','paz','market','mesrubat','eti','biskuvi','dagitim','ticaret','sanayi','pazarlama','anonim','sirketi','merkez','toptan'}
-    matches=[]
+    matches=set()
     for firm in firms:
         words=[w for w in re.findall(r'[a-z0-9]+',normalized(firm['name'])) if len(w)>3 and w not in generic]
         if words and any(word in supplier_words for word in words):
-            matches.append(firm['id'])
+            matches.add(firm['id'])
     if len(matches)==1:
-        result['firm_id']=matches[0]
+        result['firm_id']=next(iter(matches))
     else:
         result['warnings'].append('Firma eşleştirilemedi veya birden fazla eşleşme var. Seçili firmayı kontrol edin.')
     # Join product-name/price wraps until the next row or totals section.

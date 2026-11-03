@@ -19,7 +19,7 @@ class LedgerTests(unittest.TestCase):
         self.tmp.cleanup()
 
     def invoice(self, **changes):
-        data = dict(firm_id=1,number='F001',issued='2026-01-20',days=20,total='1000.50',
+        data = dict(firm_id=1,number='F001',issued='2026-01-20',days=20,total='1000.50',duplicate_confirmed=True,
                     items=[dict(product='Marka süt',unit='1 litre / adet',price='35.00')])
         data.update(changes)
         app.create_invoice(data)
@@ -65,6 +65,34 @@ class LedgerTests(unittest.TestCase):
         self.assertFalse(first.exists())
         self.assertTrue(latest.exists())
         self.assertEqual(app.backup_status()['count'],2)
+
+    def test_backup_can_be_restored_with_a_safety_snapshot(self):
+        self.invoice()
+        saved = app.automatic_backup(datetime(2026,1,3,8,0,0))
+        self.invoice(number='F002')
+        app.restore_backup(saved.name)
+        self.assertEqual([invoice['number'] for invoice in app.state()['invoices']],['F001'])
+        self.assertGreaterEqual(app.backup_status()['count'],2)
+        with self.assertRaisesRegex(ValueError,'Geçerli bir yedek'):
+            app.restore_backup('../market.sqlite3')
+
+    def test_duplicate_invoice_requires_explicit_review_and_rejects_same_file(self):
+        self.invoice()
+        duplicate=dict(firm_id=1,number='F002',issued='2026-01-20',days=20,total='1000.50',items=[])
+        with self.assertRaisesRegex(ValueError,'MÜKERRER_ONAYI'):
+            app.create_invoice(duplicate)
+        duplicate['duplicate_confirmed']=True
+        app.create_invoice(duplicate)
+        picture='data:image/png;base64,YWJj'
+        app.create_invoice(dict(firm_id=1,number='PHOTO1',issued='2026-02-01',days=1,total='10',photos=[picture],items=[]))
+        with self.assertRaisesRegex(ValueError,'Aynı fatura dosyası'):
+            app.create_invoice(dict(firm_id=1,number='PHOTO2',issued='2026-02-02',days=1,total='11',photos=[picture],items=[]))
+
+    def test_confirmed_ocr_supplier_alias_is_learned(self):
+        self.invoice(ocr_supplier='GUNES GIDA PAZARLAMA LTD')
+        firm=app.state()['firms'][0]
+        self.assertEqual(firm['ocr_samples'],1)
+        self.assertIn('GUNES GIDA',firm['ocr_aliases'])
 
     def test_invalid_amounts_and_negative_term(self):
         for value in ['NaN','Infinity','0','-1','1.001']:
@@ -178,7 +206,7 @@ class LedgerTests(unittest.TestCase):
 
     def test_duplicate_invoice_rolls_back(self):
         self.invoice()
-        with self.assertRaises(app.sqlite3.IntegrityError):
+        with self.assertRaisesRegex(ValueError,'aynı fatura numarası'):
             self.invoice()
         self.assertEqual(len(app.state()['invoices']),1)
 

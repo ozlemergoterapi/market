@@ -32,7 +32,7 @@ def automatic_backup(now=None, keep=30):
     now = now or datetime.now(ZoneInfo('Europe/Istanbul'))
     directory = backup_directory()
     directory.mkdir(parents=True, exist_ok=True)
-    target = directory / ('market-' + now.strftime('%Y-%m-%d_%H-%M-%S') + '.sqlite3')
+    target = directory / ('market-' + now.strftime('%Y-%m-%d_%H-%M-%S-%f') + '.sqlite3')
     if target.exists():
         return target
     temporary = target.with_suffix('.tmp')
@@ -58,7 +58,33 @@ def backup_status():
         'directory': str(directory),
         'latest': backups[0].name if backups else '',
         'count': len(backups),
+        'files': [{'name': path.name, 'size': path.stat().st_size} for path in backups],
     }
+
+
+def restore_backup(name):
+    """Validate and atomically restore a selected application backup."""
+    if not isinstance(name, str) or Path(name).name != name or not re.fullmatch(r'market-[0-9_-]+\.sqlite3', name):
+        raise ValueError('Geçerli bir yedek seçin.')
+    source_path = backup_directory() / name
+    if not source_path.is_file():
+        raise ValueError('Yedek dosyası bulunamadı.')
+    with sqlite3.connect(source_path) as source:
+        if source.execute('PRAGMA quick_check').fetchone()[0] != 'ok':
+            raise ValueError('Seçilen yedek bütünlük kontrolünden geçemedi.')
+        tables = {row[0] for row in source.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        if not {'firms','invoices','items','payments'} <= tables:
+            raise ValueError('Seçilen dosya Sancaklı Market yedeği değil.')
+    temporary = DB.with_suffix('.restore.tmp')
+    try:
+        with sqlite3.connect(source_path) as source, sqlite3.connect(temporary) as destination:
+            source.backup(destination)
+        automatic_backup()
+        os.replace(temporary, DB)
+        init()
+    finally:
+        if temporary.exists():
+            temporary.unlink()
 
 
 def connect():
@@ -83,6 +109,8 @@ def init():
           product TEXT NOT NULL, unit TEXT NOT NULL, price INTEGER NOT NULL CHECK(price>0));
         CREATE TABLE IF NOT EXISTS payments(id INTEGER PRIMARY KEY, invoice_id INTEGER NOT NULL REFERENCES invoices(id),
           amount INTEGER NOT NULL CHECK(amount>0), paid_on TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS firm_ocr_profiles(firm_id INTEGER NOT NULL REFERENCES firms(id),supplier_alias TEXT NOT NULL,
+          sample_count INTEGER NOT NULL DEFAULT 1,last_seen TEXT NOT NULL,PRIMARY KEY(firm_id,supplier_alias));
         ''')
         if 'identity' not in {r[1] for r in db.execute('PRAGMA table_info(invoices)')}:
             db.execute("ALTER TABLE invoices ADD COLUMN identity TEXT NOT NULL DEFAULT ''")
@@ -91,6 +119,8 @@ def init():
             db.execute("ALTER TABLE invoices ADD COLUMN import_meta TEXT NOT NULL DEFAULT '{}'")
         if 'extra_photos' not in {r[1] for r in db.execute('PRAGMA table_info(invoices)')}:
             db.execute("ALTER TABLE invoices ADD COLUMN extra_photos TEXT NOT NULL DEFAULT '[]'")
+        if 'source_hash' not in {r[1] for r in db.execute('PRAGMA table_info(invoices)')}:
+            db.execute("ALTER TABLE invoices ADD COLUMN source_hash TEXT NOT NULL DEFAULT ''")
         if 'unit_price' not in {r[1] for r in db.execute('PRAGMA table_info(items)')}:
             db.execute("ALTER TABLE items ADD COLUMN unit_price TEXT NOT NULL DEFAULT ''")
         db.execute("UPDATE items SET unit_price=printf('%.4f',price/100.0) WHERE unit_price=''")
@@ -127,6 +157,16 @@ def photo(value):
     if len(raw) > 8 * 1024 * 1024:
         raise ValueError('Fotoğraf en fazla 8 MB olabilir.')
     return value
+
+
+def photos_hash(photos):
+    if not photos:
+        return ''
+    digest = hashlib.sha256()
+    for value in photos:
+        digest.update(base64.b64decode(value.split(',', 1)[1], validate=True))
+        digest.update(b'\0PAGE\0')
+    return digest.hexdigest()
 
 
 def tsv_reading(tsv_text):
@@ -170,7 +210,10 @@ def run_tesseract(pic, lang, mode, with_tsv=True):
 def state(today=None):
     today = today or datetime.now(ZoneInfo('Europe/Istanbul')).date()
     with connect() as db:
-        firms = [dict(r) for r in db.execute('SELECT * FROM firms ORDER BY name')]
+        firms = [dict(r) for r in db.execute('''SELECT f.*,
+          COALESCE((SELECT SUM(sample_count) FROM firm_ocr_profiles WHERE firm_id=f.id),0) AS ocr_samples,
+          COALESCE((SELECT group_concat(supplier_alias,' · ') FROM firm_ocr_profiles WHERE firm_id=f.id),'') AS ocr_aliases
+          FROM firms f ORDER BY name''')]
         invoices = [dict(r) for r in db.execute('''SELECT i.id,i.firm_id,f.name AS firm,i.number,i.issued,i.due,i.total,i.import_meta,
           COALESCE((SELECT SUM(amount) FROM payments WHERE invoice_id=i.id),0) AS paid,
           photo IS NOT NULL AS has_photo FROM invoices i JOIN firms f ON f.id=i.firm_id ORDER BY due,i.id''')]
@@ -254,6 +297,7 @@ def delete_record(entity, record_id, expected=None):
             for review in db.execute('SELECT fingerprint,left_key FROM product_matches').fetchall():
                 if json.loads(review['left_key'])[0]==record_id:
                     db.execute('DELETE FROM product_matches WHERE fingerprint=?',(review['fingerprint'],))
+            db.execute('DELETE FROM firm_ocr_profiles WHERE firm_id=?',(record_id,))
         if entity != 'invoice':
             db.execute(f'DELETE FROM {tables[entity]} WHERE id=?',(record_id,))
 
@@ -276,6 +320,8 @@ def create_invoice(data, record_id=None):
         raise ValueError('En fazla 6 fotoğraf seçin.')
     photos = [photo(p) for p in photos]
     pic = photos[0] if photos else None
+    source_hash = photos_hash(photos)
+    firm_id = int(data['firm_id'])
     items = data.get('items', [])
     if not isinstance(items, list) or len(items) > 500:
         raise ValueError('Ürün listesi geçersiz.')
@@ -327,7 +373,15 @@ def create_invoice(data, record_id=None):
         raise ValueError('Aynı ürün ve birimi faturada bir kez girin.')
     with connect() as db:
         db.execute('BEGIN IMMEDIATE')
-        values = (int(data['firm_id']), number, issued.isoformat(), (issued + timedelta(days=days)).isoformat(), total, pic)
+        same_number = db.execute('SELECT id FROM invoices WHERE firm_id=? AND number=? AND id!=?',(firm_id,number,record_id or -1)).fetchone()
+        if same_number:
+            raise ValueError('Bu firmada aynı fatura numarası zaten kayıtlı.')
+        if source_hash and db.execute('SELECT id FROM invoices WHERE source_hash=? AND id!=?',(source_hash,record_id or -1)).fetchone():
+            raise ValueError('Aynı fatura dosyası daha önce kaydedilmiş.')
+        similar = db.execute('SELECT number FROM invoices WHERE firm_id=? AND issued=? AND total=? AND id!=?',(firm_id,issued.isoformat(),total,record_id or -1)).fetchone()
+        if similar and data.get('duplicate_confirmed') is not True:
+            raise ValueError('MÜKERRER_ONAYI:'+similar['number']+' numaralı faturayla firma, tarih ve toplam aynı. Yine de kaydetmek için onaylayın.')
+        values = (firm_id, number, issued.isoformat(), (issued + timedelta(days=days)).isoformat(), total, pic)
         if record_id is None:
             cur = db.execute('INSERT INTO invoices(firm_id,number,issued,due,total,photo) VALUES(?,?,?,?,?,?)', values)
             record_id = cur.lastrowid
@@ -350,8 +404,13 @@ def create_invoice(data, record_id=None):
             audit(db,'invoice',record_id,before)
             db.execute('UPDATE invoices SET firm_id=?,number=?,issued=?,due=?,total=?,photo=? WHERE id=?', (*values,record_id))
             db.execute('DELETE FROM items WHERE invoice_id=?',(record_id,))
-        db.execute('UPDATE invoices SET extra_photos=?,import_meta=? WHERE id=?',(json.dumps(photos[1:]),json.dumps(import_metadata or {}),record_id))
+        db.execute('UPDATE invoices SET extra_photos=?,import_meta=?,source_hash=? WHERE id=?',(json.dumps(photos[1:]),json.dumps(import_metadata or {}),source_hash,record_id))
         db.executemany('INSERT INTO items(invoice_id,product,unit,price,unit_price,quantity,code,source_net,source_vat,row_number,line_total) VALUES(?,?,?,?,?,?,?,?,?,?,?)', [(record_id,*r) for r in rows])
+        supplier_alias = str(data.get('ocr_supplier') or '').strip()[:200]
+        if supplier_alias:
+            db.execute('''INSERT INTO firm_ocr_profiles(firm_id,supplier_alias,sample_count,last_seen) VALUES(?,?,1,?)
+              ON CONFLICT(firm_id,supplier_alias) DO UPDATE SET sample_count=sample_count+1,last_seen=excluded.last_seen''',
+              (firm_id,supplier_alias,datetime.now(ZoneInfo('Europe/Istanbul')).isoformat()))
 
 
 def create_payment(data, record_id=None):
@@ -442,6 +501,8 @@ class Handler(BaseHTTPRequestHandler):
                 delete_record('invoice',int(data['id']),data.get('expected'))
             elif self.path == '/api/payments/delete':
                 delete_record('payment',int(data['id']))
+            elif self.path == '/api/backups/restore':
+                restore_backup(data.get('name'))
             elif self.path == '/api/firms/edit':
                 with connect() as db:
                     db.execute('BEGIN IMMEDIATE')
@@ -475,7 +536,8 @@ class Handler(BaseHTTPRequestHandler):
                 languages = subprocess.run(['tesseract','--list-langs'],capture_output=True,text=True,check=True).stdout
                 lang = 'tur+eng' if 'tur' in languages.split() else 'eng'
                 with connect() as db:
-                    firms = [dict(r) for r in db.execute('SELECT id,name FROM firms')]
+                    firms = [dict(r) for r in db.execute('''SELECT id,name FROM firms
+                      UNION ALL SELECT firm_id AS id,supplier_alias AS name FROM firm_ocr_profiles''')]
                 readings, visible_text = [], []
 
                 def add_layout(mode, with_tsv=True):
@@ -523,6 +585,8 @@ class Handler(BaseHTTPRequestHandler):
             self.respond({'ok':True},201)
         except sqlite3.IntegrityError:
             self.respond({'error':'Firma veya fatura zaten kayıtlı ya da firma seçimi geçersiz.'},400)
+        except sqlite3.DatabaseError:
+            self.respond({'error':'Veritabanı veya yedek dosyası okunamadı; mevcut kayıtlar değiştirilmedi.'},400)
         except ValueError as error:
             self.respond({'error': str(error) if str(error) else 'Bilgileri kontrol edin.'},400)
         except (KeyError, TypeError, OverflowError):

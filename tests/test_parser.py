@@ -67,6 +67,11 @@ Fatura Tarihi:
         self.assertEqual(draft['total'],'')
         self.assertIsNone(draft['firm_id'])
 
+    def test_same_firm_name_and_learned_alias_do_not_create_ambiguity(self):
+        firms=[dict(id=1,name='Güneş Gıda'),dict(id=1,name='Güneş Gıda Pazarlama Ltd')]
+        draft=parse_invoice('GUNES GIDA PAZARLAMA LTD',firms)
+        self.assertEqual(draft['firm_id'],1)
+
     def test_no_number_digits_are_invented(self):
         self.assertEqual(parse_invoice('Belge No: E10202600001584')['number'],'')
 

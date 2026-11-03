@@ -25,6 +25,8 @@ Telefon üzerinden gerçek kullanım için kimlik doğrulama ve HTTPS ile yayın
 6. Fatura üzerinden tam veya kısmi ödeme kaydedin. Ödeme ilgili faturadan düşer; fazla ödeme kabul edilmez.
 7. Genel bakıştaki aylık ödeme takviminde önceki ve sonraki ayları inceleyin. Takvim vade tarihindeki kalan borcu firma bazında gösterir ve ödeme kaydedildiğinde güncellenir.
 8. Firmalar bölümündeki Hesap geçmişi düğmesiyle o firmaya ait faturaları, ödemeleri ve kalan cariyi birlikte görüntüleyin. Fiyat değişimleri bölümündeki Fiyat geçmişi düğmesi ürünün tarih sıralı fiyatlarını ve yüzde değişimlerini gösterir.
+9. Ürün arama bölümünde ad veya ürün koduyla geçmiş alış fiyatlarını bulun. Kontrol bekleyenler bölümü onaysız fiyat değişimlerini, belirsiz eşleştirmeleri ve geçmişi bulunamayan ürünleri tek listede toplar.
+10. Toplu PDF ile en fazla 10 ayrı faturayı sıraya alın. Her PDF bir faturadır; uygulama sıradaki dosyayı okur, siz kontrol edip kaydedince sonraki dosyayı açar.
 
 Günlük özet İstanbul tarihini kullanır. Gelecek 7 gün yarın başlar. Gecikenler yalnızca kalan borcu içerir.
 
@@ -41,9 +43,12 @@ Dosyalar dış servise gönderilmez. PDF sayfaları uygulamanın içinde, bilgis
 Kayıtlar ve fotoğraflar `data/market.sqlite3` dosyasında kalıcı tutulur. Mac başlangıç dosyası kullanıldığında asıl veri `~/Library/Application Support/Sancakli Market/market.sqlite3` konumundadır. Bu klasörler Git'e eklenmez. `MARKET_DB` ile başka bir veri dosyası kullanılabilir.
 
 Uygulama her açılışta, mevcut veritabanını değiştirmeden önce SQLite’ın güvenli yedekleme yöntemiyle bir kopya oluşturur. Yedekler asıl veritabanının yanındaki `backups` klasörüne yazılır ve en yeni 30 açılış yedeği saklanır. Genel bakış ekranı son yedek dosyasını ve klasör konumunu gösterir. `MARKET_BACKUP_DIR` ile başka bir yedek klasörü seçilebilir. Yedekleme başarısız olursa uygulama terminalde açık bir hata gösterir ve veritabanını yine açmayı dener.
+Genel bakış ekranından eski bir yedek seçilip geri yüklenebilir. Geri yükleme başlamadan hemen önce mevcut veriler ayrıca yeni bir güvenlik yedeğine alınır. Seçilen dosyanın bütünlüğü ve uygulama tabloları doğrulanmadan asıl veritabanı değiştirilmez.
 Firma adı, faturanın tüm alanları ve ürün satırları, ödeme tutarı/tarihi/ilgili faturası Düzelt düğmeleriyle değiştirilebilir. Önceki kayıtlar edits tablosunda saklanır. Fatura toplamı yapılmış ödemelerin altına indirilemez; önce yanlış ödeme düzeltilmelidir. Firma, fatura ve ödemeler Sil düğmesiyle onay sonrası silinir. Firma/fatura silerken bağlı fatura, ödeme ve ürün satırı sayıları gösterilir ve birlikte silinir. Ödeme silinince borç geri açılır. Silinen kayıtlar denetim geçmişinde tutulur; arayüzden geri alma yoktur. Ürün satırları fatura düzeltme ekranındaki Sil düğmesiyle kaldırılır; fatura toplamı kullanıcı tarafından ayrıca kontrol edilir. Yedek yükleme arayüzü ve dışarıya bildirim gönderme henüz yoktur. Kullanıcının tercihiyle şifreli giriş eklenmemiştir.
 
 Fiyat artış ve düşüşlerinin tamamı (1 kuruş fark dahil) ana ekranda onay bekleyen bildirim olarak gösterilir. Değişimi onayla kontrol edildiğini kaydeder; fatura tutarını veya ödemeleri değiştirmez. Onaylanmış karşılaştırmanın ürün/birim/firma/tarih/fiyat bilgisi değişirse yeniden onay gerekir. Yanlış bilgi Faturayı düzelt ile düzeltilir. Bildirimler uygulama içindedir.
+
+Aynı firmada aynı fatura numarası ikinci kez kaydedilemez. Aynı fatura dosyasının tekrar eklenmesi engellenir. Firma, tarih ve toplam başka bir faturayla aynıysa kullanıcıya mükerrer uyarısı gösterilir ve açık onay istenir. OCR ile okunup kullanıcı tarafından firması onaylanan tedarikçi başlıkları firma tanıma örneği olarak saklanır; sonraki aynı başlıklı faturalar doğru firmayla daha kolay eşleştirilir. Yeni tablo düzenlerinin ürün sütunlarını iyileştirmek için yine o firmadan örnek fatura gerekir.
 
 ## Doğrulama
 
