@@ -110,6 +110,30 @@ class InvoiceTsvTests(unittest.TestCase):
         self.assertEqual(result["items"][0]["row_number"], 12)
         self.assertEqual(result["items"][0]["quantity"], "20")
 
+    def test_different_supplier_column_widths_use_geometric_fallback(self):
+        data = TsvBuilder()
+        data.add("1", 30, 100, 16)
+        data.add("9876543", 75, 100, 65)
+        data.add("FARKLI", 165, 100, 50)
+        data.add("MARKA", 220, 100, 45)
+        data.add("URUN", 270, 100, 40)
+        data.add("12", 355, 100, 20)
+        data.add("Adet", 382, 100, 36)
+        data.add("25,0000", 470, 100, 62)
+        data.add("%10,00", 575, 100, 50)
+        data.add("25,00", 665, 100, 48)
+        data.add("300,00", 755, 100, 55)
+
+        result = parse_tsv_table(data.text())
+
+        self.assertEqual(len(result["items"]), 1)
+        item = result["items"][0]
+        self.assertEqual(item["row_number"], 1)
+        self.assertEqual(item["product"], "FARKLI MARKA URUN")
+        self.assertEqual(item["quantity"], "12")
+        self.assertEqual(item["line_total"], "325.00")
+        self.assertIn("Farklı fatura sütun düzeniyle", item["review"])
+
     def test_low_confidence_numbers_require_user_review(self):
         data = TsvBuilder()
         data.item(1, "8223298", "BENIMO KOMBO 96GX18", 18,

@@ -760,14 +760,15 @@ class Handler(BaseHTTPRequestHandler):
                 # the cells back into rows. Sparse text is a conservative fallback.
                 add_layout(4)
                 draft = merge_readings(readings)
-                table_errors = [
-                    error for error in draft['coverage']['errors']
-                    if error != 'Fatura toplamı okunamadı veya eksik.'
-                ]
-                if not draft['items'] or table_errors:
+                def table_errors(value):
+                    return [
+                        error for error in value['coverage']['errors']
+                        if error != 'Fatura toplamı okunamadı veya eksik.'
+                    ]
+                if not draft['items'] or table_errors(draft):
                     add_layout(11)
                     draft = merge_readings(readings)
-                if not draft['items']:
+                if not draft['items'] or table_errors(draft):
                     add_layout(6)
                     draft = merge_readings(readings)
                 if not all(draft[key] for key in ('number', 'issued', 'total')):

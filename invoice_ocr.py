@@ -313,6 +313,102 @@ def _item_from_band(anchor, words, table_left, table_right):
     return item, confidence
 
 
+def _item_from_geometry(anchor, words):
+    """Extract a row without assuming one supplier's fixed column widths.
+
+    The product code anchors the left side.  The first explicit quantity unit
+    (Adet, Kg, Koli...) separates the product name from numeric columns.  The
+    first monetary value after it is the source unit price; the final two are
+    VAT and the net row amount, matching supported Turkish invoice tables.
+    """
+    ordered = sorted(
+        [word for word in words if word.center_x > anchor.code_word.center_x],
+        key=lambda word: (word.center_x, word.top),
+    )
+    unit_pattern = re.compile(r"(?:Adet|Ad\.?|Kg|Koli|Lt|Litre|Paket|Kutu)", re.IGNORECASE)
+    quantity = unit = None
+    quantity_left = quantity_right = None
+    unit_index = None
+    for index, word in enumerate(ordered):
+        if not unit_pattern.search(word.text):
+            continue
+        windows = [
+            (index, index + 1),
+            (index - 1, index + 1),
+            (index - 2, index + 1),
+            (index, index + 2),
+            (index, index + 3),
+        ]
+        for start, end in windows:
+            start, end = max(0, start), min(len(ordered), end)
+            sample = " ".join(entry.text for entry in ordered[start:end])
+            try:
+                candidate, candidate_unit = _quantity(sample)
+            except (InvalidOperation, ValueError):
+                continue
+            number_words = [
+                entry for entry in ordered[start:end]
+                if re.search(r"[0-9]", entry.text)
+                and abs(entry.center_y - word.center_y) <= max(entry.height, word.height) * 1.8
+            ]
+            if candidate > 0 and number_words:
+                quantity, unit = candidate, candidate_unit
+                quantity_left = min([word.left] + [entry.left for entry in number_words])
+                quantity_right = max([word.right] + [entry.right for entry in number_words])
+                unit_index = index
+                break
+        if quantity is not None:
+            break
+    if quantity is None:
+        raise ValueError("miktar")
+
+    product_words = [
+        word for word in words
+        if word.left >= anchor.code_word.right - max(anchor.code_word.width * .08, 3)
+        and word.right <= quantity_left
+        and word is not anchor.code_word
+    ]
+    product_text = " ".join(word.text for word in sorted(product_words, key=lambda word: (word.top, word.left)))
+    if not product_text.strip():
+        raise ValueError("ürün adı")
+
+    amount_words = [word for word in ordered[unit_index + 1:] if word.left >= quantity_right - 2]
+    amount_text = " ".join(word.text for word in amount_words)
+    amount_text = re.sub(r"(?<=\d)([.,])\s+(?=\d)", r"\1", amount_text)
+    monetary = []
+    for match in re.finditer(r"(?<!\d)\d+(?:[.,]\d+)+(?!\d)", amount_text):
+        try:
+            monetary.append(_decimal(match.group()))
+        except InvalidOperation:
+            pass
+    if len(monetary) < 3:
+        raise ValueError("tutarlar")
+    raw_price, vat, net = monetary[0], monetary[-2], monetary[-1]
+    if raw_price <= 0 or vat < 0 or net <= 0:
+        raise ValueError("sayısal alan")
+
+    gross = net + vat
+    price = (gross / quantity).quantize(Decimal(".01"), rounding=ROUND_HALF_UP)
+    review = "Farklı fatura sütun düzeniyle okundu; ürün, miktar ve tutarı faturayla karşılaştırın."
+    if any(char.isalpha() for char in anchor.code):
+        review += " Ürün kodunda harf okundu; kod otomatik değiştirilmedi."
+    confidence_values = [word.confidence for word in words if word.confidence >= 0]
+    confidence = statistics.fmean(confidence_values) if confidence_values else -1
+    return {
+        "row_number": anchor.number,
+        "line_total": f"{gross:.2f}",
+        "review": review,
+        "product": re.sub(r"\s+", " ", product_text).strip()[:200],
+        "unit": unit,
+        "price": f"{price:.2f}",
+        "code": anchor.code,
+        "quantity": _decimal_text(quantity),
+        "source_price": _decimal_text(raw_price),
+        "net": f"{net:.2f}",
+        "vat": f"{vat:.2f}",
+    }, confidence
+
+
 def _page_items(words):
     anchors = _anchors(words)
     if not anchors:
@@ -353,9 +449,13 @@ def _page_items(words):
             item, confidence = _item_from_band(anchor, band, table_left, table_right)
             parsed.append((item, confidence))
         except (InvalidOperation, ValueError):
-            warnings.append(
-                f"{anchor.number}. ürün satırının hücreleri eksiksiz okunamadı; fotoğrafla karşılaştırın."
-            )
+            try:
+                item, confidence = _item_from_geometry(anchor, band)
+                parsed.append((item, confidence))
+            except (InvalidOperation, ValueError):
+                warnings.append(
+                    f"{anchor.number}. ürün satırının hücreleri eksiksiz okunamadı; fotoğrafla karşılaştırın."
+                )
     return parsed, [anchor.number for anchor in anchors], warnings
 
 
