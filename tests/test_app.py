@@ -38,6 +38,43 @@ class LedgerTests(unittest.TestCase):
         app.create_payment(dict(invoice_id=1,amount='800.25',paid_on='2026-01-22'))
         self.assertEqual(app.state(date(2026,2,10))['totals']['total'],0)
 
+    def test_opening_balance_is_due_and_decreases_with_payment(self):
+        app.create_account_entry(dict(kind='opening',firm_id=1,entry_date='2026-01-01',due='2026-02-09',amount='500.00',reference='2025 devri'))
+        value=app.state(date(2026,2,9))
+        self.assertEqual(value['totals']['today'],50000)
+        self.assertEqual(value['firms'][0]['balance'],50000)
+        self.assertEqual(value['obligations'][0]['kind'],'opening')
+        app.create_payment(dict(target_type='opening',target_id=1,amount='125.00',paid_on='2026-02-01'))
+        value=app.state(date(2026,2,9))
+        self.assertEqual(value['totals']['today'],37500)
+        self.assertEqual(value['payments'][0]['target_type'],'opening')
+        with self.assertRaisesRegex(ValueError,'kalan borcunu aşamaz'):
+            app.create_payment(dict(target_type='opening',target_id=1,amount='375.01',paid_on='2026-02-01'))
+
+    def test_credit_note_reduces_linked_invoice_and_due_total(self):
+        self.invoice()
+        app.create_account_entry(dict(kind='credit',firm_id=1,invoice_id=1,entry_date='2026-02-01',due='2026-02-01',amount='100.50',reference='IADE-1'))
+        value=app.state(date(2026,2,9))
+        self.assertEqual(value['invoices'][0]['credited'],10050)
+        self.assertEqual(value['invoices'][0]['remaining'],90000)
+        self.assertEqual(value['totals']['today'],90000)
+        with self.assertRaisesRegex(ValueError,'kalan borcu aşamaz'):
+            app.create_payment(dict(invoice_id=1,amount='900.01',paid_on='2026-02-01'))
+        with self.assertRaisesRegex(ValueError,'kalan borcunu aşamaz'):
+            app.create_account_entry(dict(kind='credit',firm_id=1,invoice_id=1,entry_date='2026-02-01',due='2026-02-01',amount='900.01'))
+        app.delete_record('entry',1)
+        self.assertEqual(app.state(date(2026,2,9))['totals']['today'],100050)
+
+    def test_selected_backup_directory_is_persisted_and_resettable(self):
+        selected=Path(self.tmp.name)/'harici-yedek'
+        app.set_backup_directory(selected)
+        self.assertEqual(app.backup_directory(),selected.resolve())
+        self.assertEqual(app.settings()['backup_directory'],str(selected.resolve()))
+        self.invoice()
+        self.assertEqual(app.automatic_backup(datetime(2026,1,2,8,0,0)).parent,selected.resolve())
+        app.set_backup_directory()
+        self.assertEqual(app.backup_directory(),app.DB.parent/'backups')
+
     def test_price_comparison_uses_chronology_and_unit(self):
         self.invoice(number='NEW',issued='2026-02-01',items=[dict(product='Marka süt',unit='1 litre / adet',price='39')])
         self.invoice(number='OLD')

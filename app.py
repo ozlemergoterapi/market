@@ -6,6 +6,7 @@ import os
 import re
 import sqlite3
 import subprocess
+import sys
 import tempfile
 from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
@@ -20,9 +21,69 @@ ROOT = Path(__file__).resolve().parent
 DB = Path(os.environ.get('MARKET_DB', str(ROOT / 'data/market.sqlite3')))
 
 
+def settings_path():
+    return DB.parent / 'settings.json'
+
+
+def settings():
+    try:
+        value = json.loads(settings_path().read_text(encoding='utf-8'))
+        return value if isinstance(value, dict) else {}
+    except (OSError, ValueError, TypeError):
+        return {}
+
+
 def backup_directory():
     configured = os.environ.get('MARKET_BACKUP_DIR')
-    return Path(configured) if configured else DB.parent / 'backups'
+    saved = settings().get('backup_directory')
+    return Path(configured or saved) if configured or saved else DB.parent / 'backups'
+
+
+def set_backup_directory(path=None):
+    """Persist a writable backup directory, or reset to the app default."""
+    value = settings()
+    if path:
+        target = Path(path).expanduser()
+        if not target.is_absolute():
+            raise ValueError('Yedek klasörü tam bir klasör yolu olmalı.')
+        target.mkdir(parents=True, exist_ok=True)
+        probe = target / '.sancakli-write-test'
+        try:
+            probe.write_text('ok', encoding='utf-8')
+        finally:
+            if probe.exists():
+                probe.unlink()
+        value['backup_directory'] = str(target.resolve())
+    else:
+        value.pop('backup_directory', None)
+    target_settings = settings_path()
+    target_settings.parent.mkdir(parents=True, exist_ok=True)
+    temporary = target_settings.with_suffix('.tmp')
+    temporary.write_text(json.dumps(value, ensure_ascii=False, indent=2), encoding='utf-8')
+    os.replace(temporary, target_settings)
+    return backup_directory()
+
+
+def choose_backup_directory():
+    """Open the operating system's folder picker on the local computer."""
+    if sys.platform == 'darwin':
+        command = ['osascript', '-e', 'POSIX path of (choose folder with prompt "Sancaklı Market yedek klasörünü seçin")']
+    elif sys.platform == 'win32':
+        script = ('$d=New-Object System.Windows.Forms.FolderBrowserDialog;'
+                  '$d.Description="Sancaklı Market yedek klasörünü seçin";'
+                  'if($d.ShowDialog() -eq "OK"){$d.SelectedPath}else{exit 1}')
+        command = ['powershell', '-NoProfile', '-STA', '-Command',
+                   'Add-Type -AssemblyName System.Windows.Forms;' + script]
+    else:
+        command = ['zenity', '--file-selection', '--directory', '--title=Sancaklı Market yedek klasörünü seçin']
+    try:
+        selected = subprocess.run(command, capture_output=True, text=True, timeout=300)
+    except FileNotFoundError:
+        raise ValueError('Bu bilgisayarda klasör seçme penceresi açılamadı.')
+    if selected.returncode:
+        return None
+    path = selected.stdout.strip()
+    return set_backup_directory(path) if path else None
 
 
 def automatic_backup(now=None, keep=30):
@@ -108,6 +169,11 @@ def init():
         CREATE TABLE IF NOT EXISTS items(id INTEGER PRIMARY KEY, invoice_id INTEGER NOT NULL REFERENCES invoices(id),
           product TEXT NOT NULL, unit TEXT NOT NULL, price INTEGER NOT NULL CHECK(price>0));
         CREATE TABLE IF NOT EXISTS payments(id INTEGER PRIMARY KEY, invoice_id INTEGER NOT NULL REFERENCES invoices(id),
+          amount INTEGER NOT NULL CHECK(amount>0), paid_on TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS account_entries(id INTEGER PRIMARY KEY, firm_id INTEGER NOT NULL REFERENCES firms(id),
+          invoice_id INTEGER REFERENCES invoices(id), kind TEXT NOT NULL CHECK(kind IN ('opening','credit')),
+          entry_date TEXT NOT NULL, due TEXT NOT NULL, amount INTEGER NOT NULL CHECK(amount>0), reference TEXT NOT NULL DEFAULT '');
+        CREATE TABLE IF NOT EXISTS opening_payments(id INTEGER PRIMARY KEY, opening_id INTEGER NOT NULL REFERENCES account_entries(id),
           amount INTEGER NOT NULL CHECK(amount>0), paid_on TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS firm_ocr_profiles(firm_id INTEGER NOT NULL REFERENCES firms(id),supplier_alias TEXT NOT NULL,
           sample_count INTEGER NOT NULL DEFAULT 1,last_seen TEXT NOT NULL,PRIMARY KEY(firm_id,supplier_alias));
@@ -218,6 +284,11 @@ def state(today=None):
           COALESCE((SELECT SUM(amount) FROM payments WHERE invoice_id=i.id),0) AS paid,
           photo IS NOT NULL AS has_photo FROM invoices i JOIN firms f ON f.id=i.firm_id ORDER BY due,i.id''')]
         payments = [dict(r) for r in db.execute('SELECT * FROM payments ORDER BY paid_on DESC,id DESC')]
+        entries = [dict(r) for r in db.execute('''SELECT a.*,f.name AS firm,i.number AS invoice_number,
+          COALESCE((SELECT SUM(amount) FROM opening_payments WHERE opening_id=a.id),0) AS paid
+          FROM account_entries a JOIN firms f ON f.id=a.firm_id LEFT JOIN invoices i ON i.id=a.invoice_id
+          ORDER BY a.entry_date DESC,a.id DESC''')]
+        opening_payments = [dict(r) for r in db.execute('SELECT * FROM opening_payments ORDER BY paid_on DESC,id DESC')]
         product_decisions=[dict(r) for r in db.execute('SELECT * FROM product_matches')]
         reviews = {r['fingerprint'] for r in db.execute('SELECT fingerprint FROM price_reviews')}
         items = [dict(r) for r in db.execute('''SELECT t.*,i.firm_id,i.issued,i.number,i.identity,f.name AS firm FROM items t
@@ -225,8 +296,11 @@ def state(today=None):
     for item in items:
         item['price'] = float(Decimal(item['unit_price']) * 100)
     totals = dict(today=0, overdue=0, upcoming=0, total=0)
+    credits = [entry for entry in entries if entry['kind'] == 'credit']
+    openings = [entry for entry in entries if entry['kind'] == 'opening']
     for i in invoices:
-        i['remaining'] = i['total'] - i['paid']
+        i['credited'] = sum(entry['amount'] for entry in credits if entry['invoice_id'] == i['id'])
+        i['remaining'] = i['total'] - i['paid'] - i['credited']
         due = date.fromisoformat(i['due'])
         i['late_days'] = max(0, (today - due).days) if i['remaining'] else 0
         totals['total'] += i['remaining']
@@ -236,6 +310,20 @@ def state(today=None):
             totals['overdue'] += i['remaining']
         if today < due <= today + timedelta(days=7):
             totals['upcoming'] += i['remaining']
+    for opening in openings:
+        opening['remaining'] = opening['amount'] - opening['paid']
+        opening['late_days'] = max(0, (today - date.fromisoformat(opening['due'])).days) if opening['remaining'] else 0
+        totals['total'] += opening['remaining']
+        due = date.fromisoformat(opening['due'])
+        if due == today:
+            totals['today'] += opening['remaining']
+        if due < today:
+            totals['overdue'] += opening['remaining']
+        if today < due <= today + timedelta(days=7):
+            totals['upcoming'] += opening['remaining']
+    payments = [dict(payment, target_type='invoice', target_id=payment['invoice_id'], payment_key='invoice:'+str(payment['id'])) for payment in payments]
+    payments += [dict(payment, invoice_id=None, target_type='opening', target_id=payment['opening_id'], payment_key='opening:'+str(payment['id'])) for payment in opening_payments]
+    payments.sort(key=lambda payment:(payment['paid_on'],payment['id']), reverse=True)
     comparisons,suggestions,unmatched=compare_items(items,product_decisions)
     names={product_identity(item):item['product'] for item in items}
     match_history=[dict(review,left_name=names.get(review['left_key'],json.loads(review['left_key'])[1]),right_name=names.get(review['right_key'],json.loads(review['right_key'])[1])) for review in product_decisions]
@@ -259,8 +347,10 @@ def state(today=None):
             price_histories.append(group)
     price_histories.sort(key=lambda group:(group['firm'],group['product']))
     for f in firms:
-        f['balance'] = sum(i['remaining'] for i in invoices if i['firm_id'] == f['id'])
-    return dict(today=today.isoformat(), totals=totals, firms=firms, invoices=invoices, payments=payments, items=items, alerts=alerts[::-1],price_histories=price_histories,product_suggestions=suggestions,unmatched_products=unmatched,product_match_history=match_history,backup=backup_status())
+        f['balance'] = sum(i['remaining'] for i in invoices if i['firm_id'] == f['id']) + sum(o['remaining'] for o in openings if o['firm_id'] == f['id'])
+    obligations = [dict(invoice, kind='invoice') for invoice in invoices] + [dict(opening, kind='opening', number=opening['reference'] or 'Açılış bakiyesi', issued=opening['entry_date'], total=opening['amount'], has_photo=False) for opening in openings]
+    obligations.sort(key=lambda value:(value['due'],value['id']))
+    return dict(today=today.isoformat(), totals=totals, firms=firms, invoices=invoices, openings=openings, credits=credits, obligations=obligations, payments=payments, items=items, alerts=alerts[::-1],price_histories=price_histories,product_suggestions=suggestions,unmatched_products=unmatched,product_match_history=match_history,backup=backup_status())
 
 
 def audit(db, entity, record_id, before):
@@ -268,7 +358,7 @@ def audit(db, entity, record_id, before):
 
 
 def delete_record(entity, record_id, expected=None):
-    tables = {'firm': 'firms', 'invoice': 'invoices', 'payment': 'payments'}
+    tables = {'firm': 'firms', 'invoice': 'invoices', 'payment': 'payments', 'entry': 'account_entries'}
     if entity not in tables:
         raise ValueError('Geçersiz kayıt türü.')
     with connect() as db:
@@ -285,10 +375,20 @@ def delete_record(entity, record_id, expected=None):
         for invoice in invoices:
             payments.extend(dict(r) for r in db.execute('SELECT * FROM payments WHERE invoice_id=?',(invoice['id'],)))
             items.extend(dict(r) for r in db.execute('SELECT * FROM items WHERE invoice_id=?',(invoice['id'],)))
-        counts = {'invoices':len(invoices),'payments':len(payments),'items':len(items)}
-        if entity != 'payment' and expected != counts:
+        entry_query = 'firm_id=?' if entity == 'firm' else 'invoice_id=?'
+        entries = [dict(r) for r in db.execute('SELECT * FROM account_entries WHERE '+entry_query,(record_id,))] if entity in ('firm','invoice') else []
+        opening_ids = [entry['id'] for entry in entries if entry['kind']=='opening']
+        opening_payments = [dict(r) for opening_id in opening_ids for r in db.execute('SELECT * FROM opening_payments WHERE opening_id=?',(opening_id,))]
+        counts = {'invoices':len(invoices),'payments':len(payments),'items':len(items),'entries':len(entries),'opening_payments':len(opening_payments)}
+        if entity not in ('payment','entry') and any(int((expected or {}).get(key,0)) != value for key,value in counts.items()):
             raise ValueError('Bağlı kayıtlar değişmiş veya silme onayı eksik. Listeyi yenileyip silme işlemini tekrar onaylayın.')
-        audit(db,entity+'_deleted',record_id,dict(record=dict(old),invoices=invoices,payments=payments,items=items))
+        if entity == 'entry':
+            opening_payments = [dict(r) for r in db.execute('SELECT * FROM opening_payments WHERE opening_id=?',(record_id,))]
+        audit(db,entity+'_deleted',record_id,dict(record=dict(old),invoices=invoices,payments=payments,items=items,entries=entries,opening_payments=opening_payments))
+        for payment in opening_payments:
+            db.execute('DELETE FROM opening_payments WHERE id=?',(payment['id'],))
+        for entry in entries:
+            db.execute('DELETE FROM account_entries WHERE id=?',(entry['id'],))
         for invoice in invoices:
             db.execute('DELETE FROM payments WHERE invoice_id=?',(invoice['id'],))
             db.execute('DELETE FROM items WHERE invoice_id=?',(invoice['id'],))
@@ -397,12 +497,14 @@ def create_invoice(data, record_id=None):
                     raise ValueError('Kalemler eksik veya tutarsız: '+' '.join(checked['errors']))
                 import_metadata=saved_metadata
             paid = db.execute('SELECT COALESCE(SUM(amount),0) FROM payments WHERE invoice_id=?',(record_id,)).fetchone()[0]
-            if total < paid:
-                raise ValueError('Fatura toplamı yapılan ödemelerden az olamaz. Önce yanlış ödemeyi düzeltin.')
+            credited = db.execute("SELECT COALESCE(SUM(amount),0) FROM account_entries WHERE kind='credit' AND invoice_id=?",(record_id,)).fetchone()[0]
+            if total < paid + credited:
+                raise ValueError('Fatura toplamı yapılan ödeme ve iadelerin altına indirilemez. Önce yanlış hareketi düzeltin.')
             before = dict(old)
             before['items'] = [dict(r) for r in db.execute('SELECT * FROM items WHERE invoice_id=?',(record_id,))]
             audit(db,'invoice',record_id,before)
             db.execute('UPDATE invoices SET firm_id=?,number=?,issued=?,due=?,total=?,photo=? WHERE id=?', (*values,record_id))
+            db.execute("UPDATE account_entries SET firm_id=? WHERE kind='credit' AND invoice_id=?",(firm_id,record_id))
             db.execute('DELETE FROM items WHERE invoice_id=?',(record_id,))
         db.execute('UPDATE invoices SET extra_photos=?,import_meta=?,source_hash=? WHERE id=?',(json.dumps(photos[1:]),json.dumps(import_metadata or {}),source_hash,record_id))
         db.executemany('INSERT INTO items(invoice_id,product,unit,price,unit_price,quantity,code,source_net,source_vat,row_number,line_total) VALUES(?,?,?,?,?,?,?,?,?,?,?)', [(record_id,*r) for r in rows])
@@ -414,6 +516,8 @@ def create_invoice(data, record_id=None):
 
 
 def create_payment(data, record_id=None):
+    if data.get('target_type') == 'opening':
+        return create_opening_payment(data, record_id)
     amount = money(data['amount'])
     paid_on = date.fromisoformat(data['paid_on'])
     if paid_on > datetime.now(ZoneInfo('Europe/Istanbul')).date():
@@ -425,7 +529,9 @@ def create_payment(data, record_id=None):
             old = db.execute('SELECT * FROM payments WHERE id=?',(record_id,)).fetchone()
             if not old:
                 raise ValueError('Ödeme bulunamadı.')
-        row = db.execute('SELECT total-COALESCE((SELECT SUM(amount) FROM payments WHERE invoice_id=i.id AND id!=?),0) AS remaining FROM invoices i WHERE id=?', (record_id or -1,int(data['invoice_id']))).fetchone()
+        row = db.execute('''SELECT total-COALESCE((SELECT SUM(amount) FROM payments WHERE invoice_id=i.id AND id!=?),0)
+          -COALESCE((SELECT SUM(amount) FROM account_entries WHERE kind='credit' AND invoice_id=i.id),0) AS remaining
+          FROM invoices i WHERE id=?''', (record_id or -1,int(data['invoice_id']))).fetchone()
         if not row or amount > row['remaining']:
             raise ValueError('Ödeme kalan borcu aşamaz.')
         values = (int(data['invoice_id']), amount, paid_on.isoformat())
@@ -434,6 +540,84 @@ def create_payment(data, record_id=None):
         else:
             audit(db,'payment',record_id,dict(old))
             db.execute('UPDATE payments SET invoice_id=?,amount=?,paid_on=? WHERE id=?',(*values,record_id))
+
+
+def create_account_entry(data, record_id=None):
+    kind = data.get('kind')
+    if kind not in ('opening','credit'):
+        raise ValueError('Geçerli bir cari hareket seçin.')
+    entry_date = date.fromisoformat(data['entry_date'])
+    amount = money(data['amount'])
+    reference = str(data.get('reference') or '').strip()
+    if len(reference) > 200:
+        raise ValueError('Belge/açıklama en fazla 200 karakter olabilir.')
+    firm_id = int(data['firm_id'])
+    invoice_id = int(data['invoice_id']) if kind == 'credit' else None
+    due = date.fromisoformat(data['due']) if kind == 'opening' else entry_date
+    with connect() as db:
+        db.execute('BEGIN IMMEDIATE')
+        old = db.execute('SELECT * FROM account_entries WHERE id=?',(record_id,)).fetchone() if record_id else None
+        if record_id and not old:
+            raise ValueError('Cari hareket bulunamadı.')
+        if old and old['kind'] != kind:
+            raise ValueError('Açılış bakiyesi ile iade kaydı birbirine dönüştürülemez.')
+        if reference and db.execute('''SELECT id FROM account_entries
+          WHERE firm_id=? AND kind=? AND entry_date=? AND amount=? AND reference=? AND id!=?''',
+          (firm_id,kind,entry_date.isoformat(),amount,reference,record_id or -1)).fetchone():
+            raise ValueError('Aynı firma, tarih, tutar ve belge numarasıyla bu cari hareket zaten kayıtlı.')
+        if kind == 'credit':
+            invoice = db.execute('''SELECT i.firm_id,i.total-COALESCE((SELECT SUM(amount) FROM payments WHERE invoice_id=i.id),0)
+              -COALESCE((SELECT SUM(amount) FROM account_entries WHERE kind='credit' AND invoice_id=i.id AND id!=?),0) AS remaining
+              FROM invoices i WHERE i.id=?''',(record_id or -1,invoice_id)).fetchone()
+            if not invoice or invoice['firm_id'] != firm_id:
+                raise ValueError('İade/alacak kaydı için seçilen fatura firmayla uyuşmuyor.')
+            if amount > invoice['remaining']:
+                raise ValueError('İade/alacak tutarı faturanın kalan borcunu aşamaz.')
+        if kind == 'opening' and record_id:
+            paid = db.execute('SELECT COALESCE(SUM(amount),0) FROM opening_payments WHERE opening_id=?',(record_id,)).fetchone()[0]
+            if amount < paid:
+                raise ValueError('Açılış bakiyesi, yapılan ödemelerin altına indirilemez.')
+        values=(firm_id,invoice_id,kind,entry_date.isoformat(),due.isoformat(),amount,reference)
+        if record_id:
+            audit(db,'account_entry',record_id,dict(old))
+            db.execute('UPDATE account_entries SET firm_id=?,invoice_id=?,kind=?,entry_date=?,due=?,amount=?,reference=? WHERE id=?',(*values,record_id))
+        else:
+            db.execute('INSERT INTO account_entries(firm_id,invoice_id,kind,entry_date,due,amount,reference) VALUES(?,?,?,?,?,?,?)',values)
+
+
+def create_opening_payment(data, record_id=None):
+    amount = money(data['amount'])
+    paid_on = date.fromisoformat(data['paid_on'])
+    if paid_on > datetime.now(ZoneInfo('Europe/Istanbul')).date():
+        raise ValueError('Ödeme tarihi gelecekte olamaz.')
+    opening_id = int(data.get('target_id') or data.get('opening_id'))
+    with connect() as db:
+        db.execute('BEGIN IMMEDIATE')
+        old = db.execute('SELECT * FROM opening_payments WHERE id=?',(record_id,)).fetchone() if record_id else None
+        if record_id and not old:
+            raise ValueError('Ödeme bulunamadı.')
+        row = db.execute('''SELECT a.amount-COALESCE((SELECT SUM(amount) FROM opening_payments WHERE opening_id=a.id AND id!=?),0) AS remaining
+          FROM account_entries a WHERE a.id=? AND a.kind='opening' ''',(record_id or -1,opening_id)).fetchone()
+        if not row or amount > row['remaining']:
+            raise ValueError('Ödeme açılış bakiyesinin kalan borcunu aşamaz.')
+        values=(opening_id,amount,paid_on.isoformat())
+        if record_id:
+            audit(db,'opening_payment',record_id,dict(old))
+            db.execute('UPDATE opening_payments SET opening_id=?,amount=?,paid_on=? WHERE id=?',(*values,record_id))
+        else:
+            db.execute('INSERT INTO opening_payments(opening_id,amount,paid_on) VALUES(?,?,?)',values)
+
+
+def delete_payment(data):
+    if data.get('target_type') != 'opening':
+        return delete_record('payment',int(data['id']))
+    with connect() as db:
+        db.execute('BEGIN IMMEDIATE')
+        old = db.execute('SELECT * FROM opening_payments WHERE id=?',(int(data['id']),)).fetchone()
+        if not old:
+            raise ValueError('Ödeme bulunamadı.')
+        audit(db,'opening_payment_deleted',int(data['id']),dict(old))
+        db.execute('DELETE FROM opening_payments WHERE id=?',(int(data['id']),))
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -495,14 +679,29 @@ class Handler(BaseHTTPRequestHandler):
                 create_invoice(data, int(data['id']))
             elif self.path == '/api/payments/edit':
                 create_payment(data, int(data['id']))
+            elif self.path == '/api/account-entries':
+                create_account_entry(data)
+            elif self.path == '/api/account-entries/edit':
+                create_account_entry(data, int(data['id']))
+            elif self.path == '/api/account-entries/delete':
+                delete_record('entry',int(data['id']))
             elif self.path == '/api/firms/delete':
                 delete_record('firm',int(data['id']),data.get('expected'))
             elif self.path == '/api/invoices/delete':
                 delete_record('invoice',int(data['id']),data.get('expected'))
             elif self.path == '/api/payments/delete':
-                delete_record('payment',int(data['id']))
+                delete_payment(data)
             elif self.path == '/api/backups/restore':
                 restore_backup(data.get('name'))
+            elif self.path == '/api/backups/directory':
+                if data.get('action') == 'reset':
+                    set_backup_directory()
+                elif data.get('action') == 'choose':
+                    if choose_backup_directory() is None:
+                        raise ValueError('Klasör seçimi iptal edildi; mevcut yedek konumu değişmedi.')
+                else:
+                    raise ValueError('Geçerli bir yedek klasörü işlemi seçin.')
+                automatic_backup()
             elif self.path == '/api/firms/edit':
                 with connect() as db:
                     db.execute('BEGIN IMMEDIATE')
@@ -603,5 +802,6 @@ if __name__ == '__main__':
     except (OSError, sqlite3.Error) as error:
         print('Otomatik yedek oluşturulamadı: ' + str(error), flush=True)
     init()
-    print('Market Cari geliştirme sunucusu: 127.0.0.1:8000',flush=True)
-    ThreadingHTTPServer(('127.0.0.1',int(os.environ.get('PORT','8000'))),Handler).serve_forever()
+    port = int(os.environ.get('PORT','8000'))
+    print(f'Market Cari geliştirme sunucusu: 127.0.0.1:{port}',flush=True)
+    ThreadingHTTPServer(('127.0.0.1',port),Handler).serve_forever()

@@ -21,7 +21,11 @@ function invoiceTable(list){
   if(!list.length)return empty('Burada henüz fatura yok.','Firma ve faturanızı eklediğinizde ödeme planınız burada görünecek.');
   return table(['Firma / Fatura','Ödeme tarihi','Kalan borç','Durum',''],list.map(i=>{
     const badge = !i.remaining ? ['','Ödendi'] : i.late_days ? ['late',`${i.late_days} gün gecikti`] : i.due===state.today ? ['today','Bugün'] : ['','Bekliyor'];
-    return `<tr><td><strong>${esc(i.firm)}</strong><small>${esc(i.number)} · ${niceDate(i.issued)}</small></td><td>${niceDate(i.due)}</td><td><strong>${currency(i.remaining)}</strong><small>Toplam ${currency(i.total)}</small></td><td><span class="badge ${badge[0]}">${badge[1]}</span></td><td><button data-edit-invoice="${i.id}">Düzelt</button> <button data-delete-invoice="${i.id}" class="delete-button">Sil</button> ${i.has_photo?`<button data-photo="${i.id}" aria-label="Fatura fotoğrafını aç">▧</button> `:''}${i.remaining?`<button data-pay="${i.id}">Ödeme kaydet</button>`:''}</td></tr>`;
+    const opening=i.kind==='opening';
+    const detail=opening?'Açılış bakiyesi':`${esc(i.number)} · ${niceDate(i.issued)}`;
+    const totalNote=opening?`Toplam ${currency(i.total)}`:`Toplam ${currency(i.total)}${i.credited?` · İade ${currency(i.credited)}`:''}`;
+    const actions=opening?`<button data-edit-entry="${i.id}">Düzelt</button> <button data-delete-entry="${i.id}" class="delete-button">Sil</button> ${i.remaining?`<button data-pay-opening="${i.id}">Ödeme kaydet</button>`:''}`:`<button data-edit-invoice="${i.id}">Düzelt</button> <button data-delete-invoice="${i.id}" class="delete-button">Sil</button> ${i.has_photo?`<button data-photo="${i.id}" aria-label="Fatura fotoğrafını aç">▧</button> `:''}${i.remaining?`<button data-pay="${i.id}">Ödeme kaydet</button>`:''}`;
+    return `<tr><td><strong>${esc(i.firm)}</strong><small>${detail}</small></td><td>${niceDate(i.due)}</td><td><strong>${currency(i.remaining)}</strong><small>${totalNote}</small></td><td><span class="badge ${badge[0]}">${badge[1]}</span></td><td>${actions}</td></tr>`;
   }));
 }
 function monthKey(date){return date.getUTCFullYear()+'-'+String(date.getUTCMonth()+1).padStart(2,'0');}
@@ -31,7 +35,7 @@ function renderCalendar(){
   $('#calendar-month').textContent=first.toLocaleDateString('tr-TR',{month:'long',year:'numeric',timeZone:'UTC'});
   const startOffset=(first.getUTCDay()+6)%7,days=new Date(Date.UTC(year,month,0)).getUTCDate();
   const byDay={};
-  state.invoices.filter(invoice=>invoice.remaining>0&&invoice.due.slice(0,7)===calendarMonth).forEach(invoice=>(byDay[Number(invoice.due.slice(8))]??=[]).push(invoice));
+  state.obligations.filter(invoice=>invoice.remaining>0&&invoice.due.slice(0,7)===calendarMonth).forEach(invoice=>(byDay[Number(invoice.due.slice(8))]??=[]).push(invoice));
   const cells=[];
   for(let index=0;index<startOffset;index++)cells.push('<div class="calendar-day empty-day" aria-hidden="true"></div>');
   for(let day=1;day<=days;day++){
@@ -49,11 +53,18 @@ function showFirmHistory(firmId){
   const firm=state.firms.find(entry=>entry.id===firmId);if(!firm)return;
   activeFirmHistoryId=firmId;
   const invoices=state.invoices.filter(invoice=>invoice.firm_id===firmId),invoiceIds=new Set(invoices.map(invoice=>invoice.id));
-  const payments=state.payments.filter(payment=>invoiceIds.has(payment.invoice_id));
-  const events=[...invoices.map(invoice=>({date:invoice.issued,type:'invoice',invoice})),...payments.map(payment=>({date:payment.paid_on,type:'payment',payment,invoice:invoices.find(invoice=>invoice.id===payment.invoice_id)}))].sort((a,b)=>b.date.localeCompare(a.date)||Number(b.type==='payment')-Number(a.type==='payment'));
+  const openings=state.openings.filter(entry=>entry.firm_id===firmId),openingIds=new Set(openings.map(entry=>entry.id));
+  const credits=state.credits.filter(entry=>entry.firm_id===firmId);
+  const payments=state.payments.filter(payment=>payment.target_type==='invoice'?invoiceIds.has(payment.target_id):openingIds.has(payment.target_id));
+  const events=[...invoices.map(invoice=>({date:invoice.issued,type:'invoice',invoice})),...openings.map(entry=>({date:entry.entry_date,type:'opening',entry})),...credits.map(entry=>({date:entry.entry_date,type:'credit',entry})),...payments.map(payment=>({date:payment.paid_on,type:'payment',payment,invoice:invoices.find(invoice=>invoice.id===payment.target_id),opening:openings.find(entry=>entry.id===payment.target_id)}))].sort((a,b)=>b.date.localeCompare(a.date)||Number(b.type==='payment')-Number(a.type==='payment'));
   $('#firm-history-title').textContent=firm.name;
-  $('#firm-history-summary').innerHTML=`<div><small>Toplam fatura</small><strong>${currency(invoices.reduce((sum,invoice)=>sum+invoice.total,0))}</strong></div><div><small>Toplam ödeme</small><strong>${currency(payments.reduce((sum,payment)=>sum+payment.amount,0))}</strong></div><div><small>Kalan cari</small><strong>${currency(firm.balance)}</strong></div>`;
-  $('#firm-history-list').innerHTML=events.length?events.map(event=>event.type==='invoice'?`<article><time>${niceDate(event.date)}</time><div><b>Fatura · ${esc(event.invoice.number)}</b><p>Toplam ${currency(event.invoice.total)} · Kalan ${currency(event.invoice.remaining)} · Vade ${niceDate(event.invoice.due)}</p><button data-edit-invoice="${event.invoice.id}">Faturayı aç</button></div></article>`:`<article class="payment-event"><time>${niceDate(event.date)}</time><div><b>Ödeme · ${currency(event.payment.amount)}</b><p>${esc(event.invoice?.number||'Fatura')}</p><button data-edit-payment="${event.payment.id}">Ödemeyi aç</button></div></article>`).join(''):empty('Henüz hareket yok.','Bu firmaya ait fatura ve ödeme kaydı bulunmuyor.');
+  $('#firm-history-summary').innerHTML=`<div><small>Fatura + açılış</small><strong>${currency(invoices.reduce((sum,invoice)=>sum+invoice.total,0)+openings.reduce((sum,entry)=>sum+entry.amount,0))}</strong></div><div><small>Ödeme + iade</small><strong>${currency(payments.reduce((sum,payment)=>sum+payment.amount,0)+credits.reduce((sum,entry)=>sum+entry.amount,0))}</strong></div><div><small>Kalan cari</small><strong>${currency(firm.balance)}</strong></div>`;
+  $('#firm-history-list').innerHTML=events.length?events.map(event=>{
+    if(event.type==='invoice')return `<article><time>${niceDate(event.date)}</time><div><b>Fatura · ${esc(event.invoice.number)}</b><p>Toplam ${currency(event.invoice.total)} · İade ${currency(event.invoice.credited||0)} · Kalan ${currency(event.invoice.remaining)} · Vade ${niceDate(event.invoice.due)}</p><button data-edit-invoice="${event.invoice.id}">Faturayı aç</button></div></article>`;
+    if(event.type==='opening')return `<article><time>${niceDate(event.date)}</time><div><b>Açılış bakiyesi · ${currency(event.entry.amount)}</b><p>${esc(event.entry.reference||'Devir bakiyesi')} · Kalan ${currency(event.entry.remaining)} · Vade ${niceDate(event.entry.due)}</p><button data-edit-entry="${event.entry.id}">Düzelt</button> <button data-delete-entry="${event.entry.id}" class="delete-button">Sil</button></div></article>`;
+    if(event.type==='credit')return `<article class="payment-event"><time>${niceDate(event.date)}</time><div><b>İade / alacak · ${currency(event.entry.amount)}</b><p>${esc(event.entry.invoice_number||'')} · ${esc(event.entry.reference||'Belge numarası yok')}</p><button data-edit-entry="${event.entry.id}">Düzelt</button> <button data-delete-entry="${event.entry.id}" class="delete-button">Sil</button></div></article>`;
+    return `<article class="payment-event"><time>${niceDate(event.date)}</time><div><b>Ödeme · ${currency(event.payment.amount)}</b><p>${esc(event.invoice?.number||event.opening?.reference||'Açılış bakiyesi')}</p><button data-edit-payment="${event.payment.id}" data-payment-type="${event.payment.target_type}">Ödemeyi aç</button></div></article>`;
+  }).join(''):empty('Henüz hareket yok.','Bu firmaya ait fatura, açılış bakiyesi, iade veya ödeme bulunmuyor.');
   $('#statement-from').value=state.today.slice(0,4)+'-01-01';$('#statement-to').value=state.today;$('#firm-statement').hidden=true;
   $('#firm-history-dialog').showModal();
 }
@@ -61,13 +72,17 @@ function renderFirmStatement(){
   const from=$('#statement-from').value,to=$('#statement-to').value,firm=state.firms.find(entry=>entry.id===activeFirmHistoryId);
   if(!firm||!from||!to||from>to){toast('Cari ekstre için geçerli başlangıç ve bitiş tarihleri seçin.');return;}
   const invoices=state.invoices.filter(invoice=>invoice.firm_id===firm.id),ids=new Set(invoices.map(invoice=>invoice.id));
-  const payments=state.payments.filter(payment=>ids.has(payment.invoice_id));
-  const openingInvoices=invoices.filter(invoice=>invoice.issued<from).reduce((sum,invoice)=>sum+invoice.total,0);
-  const openingPayments=payments.filter(payment=>payment.paid_on<from).reduce((sum,payment)=>sum+payment.amount,0);
+  const openings=state.openings.filter(entry=>entry.firm_id===firm.id),openingIds=new Set(openings.map(entry=>entry.id));
+  const credits=state.credits.filter(entry=>entry.firm_id===firm.id);
+  const payments=state.payments.filter(payment=>payment.target_type==='invoice'?ids.has(payment.target_id):openingIds.has(payment.target_id));
+  const openingInvoices=invoices.filter(invoice=>invoice.issued<from).reduce((sum,invoice)=>sum+invoice.total,0)+openings.filter(entry=>entry.entry_date<from).reduce((sum,entry)=>sum+entry.amount,0);
+  const openingPayments=payments.filter(payment=>payment.paid_on<from).reduce((sum,payment)=>sum+payment.amount,0)+credits.filter(entry=>entry.entry_date<from).reduce((sum,entry)=>sum+entry.amount,0);
   const periodInvoices=invoices.filter(invoice=>invoice.issued>=from&&invoice.issued<=to);
+  const periodOpenings=openings.filter(entry=>entry.entry_date>=from&&entry.entry_date<=to);
+  const periodCredits=credits.filter(entry=>entry.entry_date>=from&&entry.entry_date<=to);
   const periodPayments=payments.filter(payment=>payment.paid_on>=from&&payment.paid_on<=to);
-  const opening=openingInvoices-openingPayments,invoiceTotal=periodInvoices.reduce((sum,invoice)=>sum+invoice.total,0),paymentTotal=periodPayments.reduce((sum,payment)=>sum+payment.amount,0),closing=opening+invoiceTotal-paymentTotal;
-  const rows=[...periodInvoices.map(invoice=>({date:invoice.issued,label:'Fatura '+invoice.number,debit:invoice.total,credit:0})),...periodPayments.map(payment=>({date:payment.paid_on,label:'Ödeme · '+(invoices.find(invoice=>invoice.id===payment.invoice_id)?.number||''),debit:0,credit:payment.amount}))].sort((a,b)=>a.date.localeCompare(b.date)||b.debit-a.debit);
+  const opening=openingInvoices-openingPayments,invoiceTotal=periodInvoices.reduce((sum,invoice)=>sum+invoice.total,0)+periodOpenings.reduce((sum,entry)=>sum+entry.amount,0),paymentTotal=periodPayments.reduce((sum,payment)=>sum+payment.amount,0)+periodCredits.reduce((sum,entry)=>sum+entry.amount,0),closing=opening+invoiceTotal-paymentTotal;
+  const rows=[...periodInvoices.map(invoice=>({date:invoice.issued,label:'Fatura '+invoice.number,debit:invoice.total,credit:0})),...periodOpenings.map(entry=>({date:entry.entry_date,label:'Açılış bakiyesi · '+(entry.reference||'Devir'),debit:entry.amount,credit:0})),...periodCredits.map(entry=>({date:entry.entry_date,label:'İade / alacak · '+(entry.reference||entry.invoice_number||''),debit:0,credit:entry.amount})),...periodPayments.map(payment=>({date:payment.paid_on,label:'Ödeme',debit:0,credit:payment.amount}))].sort((a,b)=>a.date.localeCompare(b.date)||b.debit-a.debit);
   $('#firm-statement').hidden=false;
   $('#firm-statement').innerHTML=`<h3>${niceDate(from)} – ${niceDate(to)} cari ekstresi</h3><div class="history-summary"><div><small>Dönem başı borcu</small><strong>${currency(opening)}</strong></div><div><small>Dönem faturaları</small><strong>${currency(invoiceTotal)}</strong></div><div><small>Dönem ödemeleri</small><strong>${currency(paymentTotal)}</strong></div><div><small>Dönem sonu borcu</small><strong>${currency(closing)}</strong></div></div>${rows.length?table(['Tarih','Hareket','Borç','Ödeme'],rows.map(row=>`<tr><td>${niceDate(row.date)}</td><td>${esc(row.label)}</td><td>${row.debit?currency(row.debit):'—'}</td><td>${row.credit?currency(row.credit):'—'}</td></tr>`)):empty('Bu dönemde hareket yok.','Seçilen tarihler arasında fatura veya ödeme bulunmuyor.')}`;
 }
@@ -100,22 +115,24 @@ function render(){
   Object.entries(state.totals).forEach(([k,v])=>$('#'+k+'-total').textContent=currency(v));
   const filter=$('#agenda-filter').value;
   const end=new Date(state.today+'T12:00:00');end.setDate(end.getDate()+7);
-  $('#agenda').innerHTML=invoiceTable(state.invoices.filter(i=>i.remaining>0 && (filter==='open'||filter==='today'&&i.due===state.today||filter==='late'&&i.late_days>0||filter==='week'&&i.due>state.today&&new Date(i.due+'T12:00:00')<=end)));
+  $('#agenda').innerHTML=invoiceTable(state.obligations.filter(i=>i.remaining>0 && (filter==='open'||filter==='today'&&i.due===state.today||filter==='late'&&i.late_days>0||filter==='week'&&i.due>state.today&&new Date(i.due+'T12:00:00')<=end)));
   const daily = {};
-  state.invoices.filter(i=>i.remaining>0).forEach(i=>daily[i.due]=(daily[i.due]||0)+i.remaining);
+  state.obligations.filter(i=>i.remaining>0).forEach(i=>daily[i.due]=(daily[i.due]||0)+i.remaining);
   let dailySection=$('#daily-summary');
   if(!dailySection){dailySection=document.createElement('div');dailySection.id='daily-summary';$('#agenda').before(dailySection);}
   dailySection.innerHTML=Object.keys(daily).length?`<div class="daily-totals">${Object.entries(daily).sort(([a],[b])=>a.localeCompare(b)).map(([d,total])=>`<div><small>${niceDate(d)}${d<state.today?' · Gecikti':''}</small><strong>${currency(total)}</strong></div>`).join('')}</div>`:'';
   renderCalendar();
   const backup=state.backup||{};
-  $('#backup-status').innerHTML=`<b>Otomatik yedekleme açık</b><span>${backup.latest?`Son yedek: ${esc(backup.latest)} · Toplam ${backup.count} yedek`:'İlk yedek, uygulamayı bir sonraki açışınızda oluşturulacak.'}<br>Konum: ${esc(backup.directory||'')}</span>${backup.files?.length?`<div class="backup-restore"><select id="backup-file" aria-label="Geri yüklenecek yedek">${backup.files.map(file=>`<option value="${esc(file.name)}">${esc(file.name)} · ${(file.size/1048576).toLocaleString('tr-TR',{maximumFractionDigits:1})} MB</option>`).join('')}</select><button data-restore-backup>Seçili yedeği geri yükle</button></div>`:''}`;
+  $('#backup-status').innerHTML=`<b>Otomatik yedekleme açık</b><span>${backup.latest?`Son yedek: ${esc(backup.latest)} · Toplam ${backup.count} yedek`:'İlk yedek, uygulamayı bir sonraki açışınızda oluşturulacak.'}<br>Konum: ${esc(backup.directory||'')}</span><div class="backup-actions"><button data-choose-backup>Klasörü değiştir</button><button data-reset-backup>Varsayılan klasöre dön</button></div>${backup.files?.length?`<div class="backup-restore"><select id="backup-file" aria-label="Geri yüklenecek yedek">${backup.files.map(file=>`<option value="${esc(file.name)}">${esc(file.name)} · ${(file.size/1048576).toLocaleString('tr-TR',{maximumFractionDigits:1})} MB</option>`).join('')}</select><button data-restore-backup>Seçili yedeği geri yükle</button></div>`:''}`;
   const search=$('#search').value.toLocaleLowerCase('tr');
   $('#invoice-list').innerHTML=invoiceTable(state.invoices.filter(i=>(i.firm+' '+i.number).toLocaleLowerCase('tr').includes(search)));
   $('#firm-list').innerHTML=state.firms.length?state.firms.map(f=>`<article class="firm-card"><h2>${esc(f.name)}</h2><p>Kalan cari borç</p><strong>${currency(f.balance)}</strong><p>Fatura tanıma: ${f.ocr_samples?`${f.ocr_samples} onaylı örnek`:'İlk örnek bekleniyor'}</p>${f.ocr_aliases?`<small>${esc(f.ocr_aliases)}</small>`:''}<p><button data-firm-history="${f.id}" class="primary">Hesap geçmişi</button> <button data-edit-firm="${f.id}">Düzelt</button> <button data-delete-firm="${f.id}" class="delete-button">Sil</button></p></article>`).join(''):empty('İlk firmanızı ekleyin.','Faturalarını takip edeceğiniz tedarikçilerinizi buradan kaydedin.');
+  const entries=[...state.openings,...state.credits].sort((a,b)=>b.entry_date.localeCompare(a.entry_date)||b.id-a.id);
+  $('#account-entry-list').innerHTML=entries.length?table(['Firma / Hareket','Tarih','Tutar / Kalan',''],entries.map(entry=>`<tr><td><strong>${esc(entry.firm)}</strong><small>${entry.kind==='opening'?'Açılış bakiyesi':'İade / alacak · Fatura '+esc(entry.invoice_number||'')}</small></td><td>${niceDate(entry.entry_date)}${entry.kind==='opening'?`<small>Vade ${niceDate(entry.due)}</small>`:''}</td><td><strong>${entry.kind==='credit'?'− ':''}${currency(entry.amount)}</strong>${entry.kind==='opening'?`<small>Kalan ${currency(entry.remaining)}</small>`:''}<small>${esc(entry.reference||'')}</small></td><td><button data-edit-entry="${entry.id}">Düzelt</button> <button data-delete-entry="${entry.id}" class="delete-button">Sil</button></td></tr>`)):empty('Henüz açılış veya iade kaydı yok.','Gerekirse yukarıdaki düğmelerden ekleyebilirsiniz.');
   $('#price-list').innerHTML=state.alerts.length?table(['Ürün / Firma','Önceki fiyat','Yeni fiyat','Değişim','Onay'],state.alerts.map(a=>`<tr><td><strong>${esc(a.product)}</strong><small>${esc(a.unit)} · Kod: ${esc(a.code||'—')} · ${esc(a.matched_by||'')} · ${esc(a.firm)} · ${niceDate(a.issued)} · ${esc(a.number)}</small></td><td>${unitCurrency(a.old_price)}<small>${esc(a.old_product||a.product)}</small></td><td>${unitCurrency(a.price)}</td><td><span class="badge ${a.change>0?'late':''}">${a.change>0?'↑':'↓'} %${Math.abs(a.change).toLocaleString('tr-TR')}</span></td><td><button data-price-history="${a.history_id}">Fiyat geçmişi</button> ${a.approved?'<span class="badge">Onaylandı</span>':`<button data-approve="${a.fingerprint}" class="primary">Değişimi onayla</button> <button data-edit-invoice="${a.invoice_id}">Faturayı düzelt</button>`}</td></tr>`)):empty('Henüz fiyat değişimi yok.','Aynı firmanın aynı ürün ve ambalajını iki faturada kaydettiğinizde değişim burada görünür.');
   renderProductSuggestions();
   renderProductSearch();renderReviewQueue();
-  $('#payment-list').innerHTML=state.payments.length?table(['Firma / Fatura','Ödeme tarihi','Ödenen',''],state.payments.map(p=>{const i=state.invoices.find(i=>i.id===p.invoice_id);return `<tr><td>${esc(i.firm)}<small>${esc(i.number)}</small></td><td>${niceDate(p.paid_on)}</td><td>${currency(p.amount)}</td><td><button data-edit-payment="${p.id}">Düzelt</button> <button data-delete-payment="${p.id}" class="delete-button">Sil</button></td></tr>`;})):empty('Henüz ödeme kaydı yok.','Fatura satırındaki “Ödeme kaydet” düğmesini kullanın.');
+  $('#payment-list').innerHTML=state.payments.length?table(['Firma / Borç','Ödeme tarihi','Ödenen',''],state.payments.map(p=>{const target=p.target_type==='invoice'?state.invoices.find(i=>i.id===p.target_id):state.openings.find(i=>i.id===p.target_id);return `<tr><td>${esc(target?.firm||'')}<small>${esc(p.target_type==='invoice'?(target?.number||'Fatura'):(target?.reference||'Açılış bakiyesi'))}</small></td><td>${niceDate(p.paid_on)}</td><td>${currency(p.amount)}</td><td><button data-edit-payment="${p.id}" data-payment-type="${p.target_type}">Düzelt</button> <button data-delete-payment="${p.id}" data-payment-type="${p.target_type}" class="delete-button">Sil</button></td></tr>`;})):empty('Henüz ödeme kaydı yok.','Fatura veya açılış bakiyesi satırındaki “Ödeme kaydet” düğmesini kullanın.');
 }
 async function refresh(){state=await api('state');render();}
 document.querySelectorAll('[data-tab]').forEach(b=>b.onclick=()=>{
@@ -142,6 +159,15 @@ document.addEventListener('click',async event=>{
   try{await api('backups/restore',{name});calendarMonth=null;await refresh();toast('Yedek geri yüklendi. Kayıtlar seçilen tarihe döndürüldü.');}
   catch(error){toast(error.message);button.disabled=false;}
 });
+document.addEventListener('click',async event=>{
+  const choose=event.target.closest('[data-choose-backup]'),reset=event.target.closest('[data-reset-backup]');
+  if(!choose&&!reset)return;
+  const button=choose||reset;
+  if(reset&&!window.confirm('Yedekler yeniden uygulamanın kendi backups klasörüne yazılacak. Mevcut yedek dosyaları silinmeyecek. Devam edilsin mi?'))return;
+  button.disabled=true;
+  try{await api('backups/directory',{action:choose?'choose':'reset'});await refresh();toast(choose?'Yedek klasörü değiştirildi ve yeni yedek oluşturuldu.':'Varsayılan yedek klasörüne dönüldü.');}
+  catch(error){toast(error.message);button.disabled=false;}
+});
 $('#batch-invoice').onclick=()=>{renderBatchQueue();$('#batch-status').textContent='';$('#batch-dialog').showModal();};
 $('#batch-files').onchange=async event=>{
   const files=[...event.target.files];event.target.value='';
@@ -161,6 +187,23 @@ $('#batch-files').onchange=async event=>{
 };
 $('#start-batch').onclick=openBatchInvoice;
 $('#new-firm').onclick=()=>{setMode('firm',null);$('#firm-form').reset();$('#firm-form .form-error').textContent='';$('#firm-dialog').showModal();};
+function openAccountEntry(kind,id=null){
+  if(!state.firms.length){toast('Önce firma ekleyin.');$('#new-firm').click();return;}
+  const form=$('#account-entry-form'),entry=id?[...state.openings,...state.credits].find(value=>value.id===id):null;
+  kind=entry?.kind||kind;form.reset();form.dataset.editId=id||'';form.elements.kind.value=kind;
+  form.elements.firm_id.innerHTML=state.firms.map(firm=>`<option value="${firm.id}">${esc(firm.name)}</option>`).join('');
+  form.elements.entry_date.value=entry?.entry_date||state.today;form.elements.due.value=entry?.due||state.today;
+  form.elements.amount.value=entry?(entry.amount/100).toFixed(2):'';form.elements.reference.value=entry?.reference||'';
+  if(entry)form.elements.firm_id.value=entry.firm_id;
+  const credit=kind==='credit';form.querySelector('h2').textContent=(credit?'İade / alacak':'Açılış bakiyesi')+(id?' düzelt':' ekle');
+  form.querySelector('.credit-field').hidden=!credit;form.querySelector('.opening-field').hidden=credit;form.elements.invoice_id.required=credit;form.elements.due.required=!credit;
+  const fillInvoices=()=>{const firmId=Number(form.elements.firm_id.value);form.elements.invoice_id.innerHTML=state.invoices.filter(invoice=>invoice.firm_id===firmId&&(invoice.remaining>0||invoice.id===entry?.invoice_id)).map(invoice=>`<option value="${invoice.id}">${esc(invoice.number)} · Kalan ${currency(invoice.remaining+(invoice.id===entry?.invoice_id?entry.amount:0))}</option>`).join('');if(entry?.invoice_id)form.elements.invoice_id.value=entry.invoice_id;};
+  fillInvoices();form.elements.firm_id.onchange=fillInvoices;
+  form.querySelector('#account-entry-help').textContent=credit?'Tutar seçilen faturanın kalan borcundan düşer ve ödeme planı hemen güncellenir.':'Bu eski borç vade tarihinde ödeme ajandasında görünür ve ödeme kaydedildikçe azalır.';
+  form.querySelector('.form-error').textContent='';form.querySelector('button.primary').textContent=id?'Düzeltmeyi kaydet':'Kaydet';$('#account-entry-dialog').showModal();
+}
+$('#new-opening').onclick=()=>openAccountEntry('opening');
+$('#new-credit').onclick=()=>openAccountEntry('credit');
 $('#new-invoice').onclick=()=>{
   if(!state)return;
   if(!state.firms.length){toast('Önce faturanın ait olduğu firmayı ekleyin.');$('[data-tab="firms"]').click();$('#new-firm').click();return;}
@@ -476,8 +519,8 @@ $('#read-photo').onclick=async()=>{
 };
 
 document.addEventListener('click',async e=>{
-  const pay=e.target.closest('[data-pay]'),photo=e.target.closest('[data-photo]');
-  if(pay){setMode('payment',null);const i=state.invoices.find(i=>i.id===Number(pay.dataset.pay));const f=$('#payment-form');f.reset();f.querySelector('.form-error').textContent='';paymentOptions(f);f.elements.invoice_id.value=i.id;f.elements.amount.value=(i.remaining/100).toFixed(2);f.elements.amount.max=(i.remaining/100).toFixed(2);f.elements.paid_on.value=state.today;f.elements.paid_on.max=state.today;$('#payment-description').textContent=`${i.firm} · ${i.number} · Kalan ${currency(i.remaining)}`;$('#payment-dialog').showModal();}
+  const pay=e.target.closest('[data-pay]'),payOpening=e.target.closest('[data-pay-opening]'),photo=e.target.closest('[data-photo]');
+  if(pay||payOpening){setMode('payment',null);const opening=Boolean(payOpening);const i=opening?state.openings.find(i=>i.id===Number(payOpening.dataset.payOpening)):state.invoices.find(i=>i.id===Number(pay.dataset.pay));const f=$('#payment-form');f.reset();f.querySelector('.form-error').textContent='';paymentOptions(f);f.elements.target.value=(opening?'opening:':'invoice:')+i.id;f.elements.amount.value=(i.remaining/100).toFixed(2);f.elements.amount.max=(i.remaining/100).toFixed(2);f.elements.paid_on.value=state.today;f.elements.paid_on.max=state.today;$('#payment-description').textContent=`${i.firm} · ${opening?(i.reference||'Açılış bakiyesi'):i.number} · Kalan ${currency(i.remaining)}`;$('#payment-dialog').showModal();}
   if(photo){try{const r=await api('photo/'+photo.dataset.photo);$('#photo-pages').innerHTML=(r.photos||[r.photo]).map((p,index)=>`<p>Sayfa ${index+1}</p><img src="${esc(p)}" alt="Fatura sayfa ${index+1}" style="max-width:100%">`).join('');$('#photo-dialog').showModal();}catch(e){toast(e.message);}}
 });
 for(const [id,path] of [['firm','firms'],['invoice','invoices'],['payment','payments']]){
@@ -485,6 +528,12 @@ for(const [id,path] of [['firm','firms'],['invoice','invoices'],['payment','paym
     e.preventDefault();const form=e.target,button=form.querySelector('button.primary'),error=form.querySelector('.form-error');error.textContent='';
     if((photoLoading||$('#read-photo').disabled)&&id==='invoice'){error.textContent='Fatura dosyasının hazırlanmasını bekleyin.';return;}
     const data=Object.fromEntries(new FormData(form));
+    if(id==='payment'){
+      const [targetType,targetId]=String(data.target||'').split(':');
+      data.target_type=targetType;data.target_id=Number(targetId);
+      if(targetType==='invoice')data.invoice_id=Number(targetId);
+      delete data.target;
+    }
     if(id==='invoice'){data.photo=selectedPhotos.length?null:selectedPhoto;data.photos=selectedPhotos;data.ocr_supplier=lastOcrSupplier;data.items=[...document.querySelectorAll('.item-row')].map(r=>({product:r.querySelector('.product').value,unit:r.querySelector('.unit').value,price:r.querySelector('.price').value,quantity:r.querySelector('.quantity').value,code:r.querySelector('.code').value,net:r.dataset.sourceNet||null,vat:r.dataset.sourceVat||null,row_number:r.querySelector('.row-number').value,line_total:r.querySelector('.line-total').value}));}
     if(id==='invoice'){const errors=renderImportCheck();data.import_check=activeImportCheck;if(errors.length){error.textContent='Eksik veya tutarsız ürünlerle kaydedilemez. '+errors.join(' ');return;}}
     const editing=form.dataset.editId;
@@ -505,6 +554,13 @@ for(const [id,path] of [['firm','firms'],['invoice','invoices'],['payment','paym
     catch(e){error.textContent=e.message;}finally{button.disabled=false;}
   };
 }
+$('#account-entry-form').onsubmit=async event=>{
+  event.preventDefault();const form=event.target,button=form.querySelector('button.primary'),error=form.querySelector('.form-error');error.textContent='';
+  const data=Object.fromEntries(new FormData(form)),editing=form.dataset.editId;if(editing)data.id=Number(editing);
+  button.disabled=true;
+  try{await api('account-entries'+(editing?'/edit':''),data);form.closest('dialog').close();await refresh();toast(editing?'Cari hareket düzeltildi; tüm bakiyeler güncellendi.':'Cari hareket kaydedildi; tüm bakiyeler güncellendi.');}
+  catch(value){error.textContent=value.message;}finally{button.disabled=false;}
+};
 refresh().catch(e=>toast('Veriler yüklenemedi: '+e.message));
 setInterval(()=>{if(!document.querySelector('dialog[open]'))refresh().catch(()=>{});},60000);
 
@@ -515,11 +571,11 @@ function setMode(kind,id){
   form.querySelector('h2').textContent=nouns[kind]+(id?' düzelt':kind==='payment'?' kaydet':' ekle');
   form.querySelector('button.primary').textContent=id?'Düzeltmeyi kaydet':kind==='invoice'?'Onayla ve faturayı kaydet':kind==='firm'?'Firmayı kaydet':'Ödemeyi kaydet';
 }
-function paymentOptions(form){
-  form.elements.invoice_id.innerHTML=state.invoices.map(i=>`<option value="${i.id}">${esc(i.firm)} · ${esc(i.number)}</option>`).join('');
+function paymentOptions(form,type=null){
+  form.elements.target.innerHTML=state.obligations.filter(i=>!type||(i.kind==='opening'?'opening':'invoice')===type).map(i=>`<option value="${i.kind==='opening'?'opening':'invoice'}:${i.id}">${esc(i.firm)} · ${esc(i.kind==='opening'?(i.reference||'Açılış bakiyesi'):i.number)}</option>`).join('');
 }
 document.addEventListener('click',async e=>{
-  const firm=e.target.closest('[data-edit-firm]'),invoice=e.target.closest('[data-edit-invoice]'),payment=e.target.closest('[data-edit-payment]'),approve=e.target.closest('[data-approve]');
+  const firm=e.target.closest('[data-edit-firm]'),invoice=e.target.closest('[data-edit-invoice]'),entry=e.target.closest('[data-edit-entry]'),payment=e.target.closest('[data-edit-payment]'),approve=e.target.closest('[data-approve]');
   if(firm){
     $('#new-firm').click();const f=state.firms.find(f=>f.id===Number(firm.dataset.editFirm));setMode('firm',f.id);$('#firm-form [name=name]').value=f.name;
   }
@@ -536,9 +592,10 @@ document.addEventListener('click',async e=>{
       finally{photoLoading=false;form.querySelector('button.primary').disabled=false;}
     }
   }
+  if(entry){entry.closest('#firm-history-dialog')?.close();openAccountEntry(null,Number(entry.dataset.editEntry));}
   if(payment){
     payment.closest('#firm-history-dialog')?.close();
-    const p=state.payments.find(p=>p.id===Number(payment.dataset.editPayment));const form=$('#payment-form');form.reset();setMode('payment',p.id);paymentOptions(form);form.elements.invoice_id.value=p.invoice_id;form.elements.amount.value=(p.amount/100).toFixed(2);form.elements.amount.removeAttribute('max');form.elements.paid_on.value=p.paid_on;form.elements.paid_on.max=state.today;form.querySelector('.form-error').textContent='';$('#payment-description').textContent='Tutarı, tarihi veya yanlış seçilen faturayı düzeltebilirsiniz.';$('#payment-dialog').showModal();
+    const type=payment.dataset.paymentType||'invoice';const p=state.payments.find(p=>p.id===Number(payment.dataset.editPayment)&&p.target_type===type);const form=$('#payment-form');form.reset();setMode('payment',p.id);paymentOptions(form,p.target_type);form.elements.target.value=p.target_type+':'+p.target_id;form.elements.amount.value=(p.amount/100).toFixed(2);form.elements.amount.removeAttribute('max');form.elements.paid_on.value=p.paid_on;form.elements.paid_on.max=state.today;form.querySelector('.form-error').textContent='';$('#payment-description').textContent='Tutarı, tarihi veya aynı türde yanlış seçilen borcu düzeltebilirsiniz.';$('#payment-dialog').showModal();
   }
   if(approve){
     approve.disabled=true;
@@ -547,21 +604,25 @@ document.addEventListener('click',async e=>{
   }
 });
 
-$('#payment-form [name=invoice_id]').onchange=()=>{
-  const form=$('#payment-form'),i=state.invoices.find(i=>i.id===Number(form.elements.invoice_id.value));
-  const old=state.payments.find(p=>p.id===Number(form.dataset.editId));
-  form.elements.amount.max=((i.remaining+(old&&old.invoice_id===i.id?old.amount:0))/100).toFixed(2);
+$('#payment-form [name=target]').onchange=()=>{
+  const form=$('#payment-form'),[type,id]=form.elements.target.value.split(':'),i=type==='opening'?state.openings.find(i=>i.id===Number(id)):state.invoices.find(i=>i.id===Number(id));
+  const old=state.payments.find(p=>p.id===Number(form.dataset.editId)&&p.target_type===type);
+  form.elements.amount.max=((i.remaining+(old&&old.target_id===i.id?old.amount:0))/100).toFixed(2);
 };
 
 document.addEventListener('click',async e=>{
-  const button=e.target.closest('[data-delete-firm],[data-delete-invoice],[data-delete-payment]');
+  const button=e.target.closest('[data-delete-firm],[data-delete-invoice],[data-delete-payment],[data-delete-entry]');
   if(!button)return;
   let path, data, message;
-  if(button.dataset.deletePayment){
-    const payment=state.payments.find(p=>p.id===Number(button.dataset.deletePayment));
+  if(button.dataset.deletePayment!==undefined){
+    const type=button.dataset.paymentType||'invoice';const payment=state.payments.find(p=>p.id===Number(button.dataset.deletePayment)&&p.target_type===type);
     if(!payment)return;
-    path='payments/delete';data={id:payment.id};
-    message=currency(payment.amount)+' tutarındaki ödeme silinecek. İlgili faturanın kalan borcu bu tutar kadar artacak. Onaylıyor musunuz?';
+    path='payments/delete';data={id:payment.id,target_type:type};
+    message=currency(payment.amount)+' tutarındaki ödeme silinecek. İlgili borcun kalan tutarı bu kadar artacak. Onaylıyor musunuz?';
+  }else if(button.dataset.deleteEntry!==undefined){
+    const entry=[...state.openings,...state.credits].find(value=>value.id===Number(button.dataset.deleteEntry));if(!entry)return;
+    path='account-entries/delete';data={id:entry.id};
+    message=(entry.kind==='opening'?'Açılış bakiyesi':'İade / alacak')+' kaydı silinecek.'+(entry.kind==='opening'&&entry.paid?' Bağlı ödemeler de silinecek.':'')+' Cari ve ödeme planı yeniden hesaplanacak. Onaylıyor musunuz?';
   }else{
     const firmMode=button.dataset.deleteFirm!==undefined;
     const id=Number(firmMode?button.dataset.deleteFirm:button.dataset.deleteInvoice);
@@ -571,13 +632,16 @@ document.addEventListener('click',async e=>{
     const ids=new Set(invoices.map(i=>i.id));
     const payments=state.payments.filter(p=>ids.has(p.invoice_id));
     const items=state.items.filter(t=>ids.has(t.invoice_id));
+    const entries=[...state.openings,...state.credits].filter(entry=>firmMode?entry.firm_id===id:entry.invoice_id===id);
+    const openingIds=new Set(entries.filter(entry=>entry.kind==='opening').map(entry=>entry.id));
+    const openingPayments=state.payments.filter(payment=>payment.target_type==='opening'&&openingIds.has(payment.target_id));
     path=firmMode?'firms/delete':'invoices/delete';
-    data={id,expected:{invoices:invoices.length,payments:payments.length,items:items.length}};
-    message=(firmMode?record.name+' firması':record.number+' faturası')+' silinecek.\nBağlı '+invoices.length+' fatura, '+payments.length+' ödeme ve '+items.length+' ürün satırı da silinecek.\nCari toplamlar ve fiyat karşılaştırmaları yeniden hesaplanacak. Bu işlem ekrandan geri alınamaz. Onaylıyor musunuz?';
+    data={id,expected:{invoices:invoices.length,payments:payments.length,items:items.length,entries:entries.length,opening_payments:openingPayments.length}};
+    message=(firmMode?record.name+' firması':record.number+' faturası')+' silinecek.\nBağlı '+invoices.length+' fatura, '+payments.length+' fatura ödemesi, '+entries.length+' açılış/iade kaydı, '+openingPayments.length+' açılış ödemesi ve '+items.length+' ürün satırı da silinecek.\nCari toplamlar ve fiyat karşılaştırmaları yeniden hesaplanacak. Bu işlem ekrandan geri alınamaz. Onaylıyor musunuz?';
   }
   if(!window.confirm(message))return;
   button.disabled=true;
-  try{await api(path,data);await refresh();toast('Kayıt silindi; ödeme ve cari toplamları güncellendi.');}
+  try{button.closest('#firm-history-dialog')?.close();await api(path,data);await refresh();toast('Kayıt silindi; ödeme ve cari toplamları güncellendi.');}
   catch(error){toast(error.message);button.disabled=false;}
 });
 
