@@ -95,12 +95,13 @@ fi
 echo 'Sancaklı Market Mac uygulaması hazırlanıyor...'
 "$market_python" -m venv --clear .mac-build-env
 . .mac-build-env/bin/activate
-python -m pip install --quiet --upgrade pyinstaller pillow pillow-heif
+python -m pip install --quiet --upgrade pyinstaller pillow pillow-heif tzdata
 python -m PyInstaller --noconfirm --clean --windowed \
   --name 'Sancakli Market' \
   --osx-bundle-identifier 'tr.sancaklimarket.cari' \
   --icon static/logo.png \
   --add-data 'static:static' \
+  --collect-data tzdata \
   desktop_launcher.py
 
 mkdir -p "$HOME/Applications"

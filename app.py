@@ -11,18 +11,24 @@ import statistics
 import subprocess
 import sys
 import tempfile
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import unquote
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from invoice_parser import parse_invoice, check_items, merge_readings
 from invoice_ocr import parse_tsv_table
 from product_matching import compare_items, identity as product_identity
 
 ROOT = Path(getattr(sys, '_MEIPASS', Path(__file__).resolve().parent))
 DB = Path(os.environ.get('MARKET_DB', str(ROOT / 'data/market.sqlite3')))
+try:
+    ISTANBUL = ZoneInfo('Europe/Istanbul')
+except ZoneInfoNotFoundError:
+    # Turkey has used permanent UTC+3 since 2016. This fallback keeps the
+    # packaged Windows application usable even if OS time-zone data is absent.
+    ISTANBUL = timezone(timedelta(hours=3), name='Europe/Istanbul')
 
 
 def settings_path():
@@ -94,7 +100,7 @@ def automatic_backup(now=None, keep=30):
     """Create a consistent startup snapshot and retain the newest snapshots."""
     if not DB.exists() or not DB.stat().st_size:
         return None
-    now = now or datetime.now(ZoneInfo('Europe/Istanbul'))
+    now = now or datetime.now(ISTANBUL)
     directory = backup_directory()
     directory.mkdir(parents=True, exist_ok=True)
     target = directory / ('market-' + now.strftime('%Y-%m-%d_%H-%M-%S-%f') + '.sqlite3')
@@ -236,7 +242,7 @@ def save_draft(key, payload):
     with connect() as db:
         db.execute('''INSERT INTO form_drafts(draft_key,payload,updated_on) VALUES(?,?,?)
           ON CONFLICT(draft_key) DO UPDATE SET payload=excluded.payload,updated_on=excluded.updated_on''',
-          (key, serialized, datetime.now(ZoneInfo('Europe/Istanbul')).isoformat()))
+          (key, serialized, datetime.now(ISTANBUL).isoformat()))
 
 
 def load_draft(key):
@@ -460,7 +466,7 @@ def run_tesseract(pic, lang, mode, with_tsv=True, executable='tesseract'):
 
 
 def state(today=None):
-    today = today or datetime.now(ZoneInfo('Europe/Istanbul')).date()
+    today = today or datetime.now(ISTANBUL).date()
     with connect() as db:
         firms = [dict(r) for r in db.execute('''SELECT f.*,
           COALESCE((SELECT SUM(sample_count) FROM firm_ocr_profiles WHERE firm_id=f.id),0) AS ocr_samples,
@@ -540,7 +546,7 @@ def state(today=None):
 
 
 def audit(db, entity, record_id, before):
-    db.execute("INSERT INTO edits(entity,record_id,changed_on,before_json) VALUES(?,?,?,?)", (entity,record_id,datetime.now(ZoneInfo("Europe/Istanbul")).isoformat(),json.dumps(before,ensure_ascii=False)))
+    db.execute("INSERT INTO edits(entity,record_id,changed_on,before_json) VALUES(?,?,?,?)", (entity,record_id,datetime.now(ISTANBUL).isoformat(),json.dumps(before,ensure_ascii=False)))
 
 
 def delete_record(entity, record_id, expected=None):
@@ -698,7 +704,7 @@ def create_invoice(data, record_id=None):
         if supplier_alias:
             db.execute('''INSERT INTO firm_ocr_profiles(firm_id,supplier_alias,sample_count,last_seen) VALUES(?,?,1,?)
               ON CONFLICT(firm_id,supplier_alias) DO UPDATE SET sample_count=sample_count+1,last_seen=excluded.last_seen''',
-              (firm_id,supplier_alias,datetime.now(ZoneInfo('Europe/Istanbul')).isoformat()))
+              (firm_id,supplier_alias,datetime.now(ISTANBUL).isoformat()))
 
 
 def create_payment(data, record_id=None):
@@ -706,7 +712,7 @@ def create_payment(data, record_id=None):
         return create_opening_payment(data, record_id)
     amount = money(data['amount'])
     paid_on = date.fromisoformat(data['paid_on'])
-    if paid_on > datetime.now(ZoneInfo('Europe/Istanbul')).date():
+    if paid_on > datetime.now(ISTANBUL).date():
         raise ValueError('Ödeme tarihi gelecekte olamaz.')
     with connect() as db:
         db.execute('BEGIN IMMEDIATE')
@@ -774,7 +780,7 @@ def create_account_entry(data, record_id=None):
 def create_opening_payment(data, record_id=None):
     amount = money(data['amount'])
     paid_on = date.fromisoformat(data['paid_on'])
-    if paid_on > datetime.now(ZoneInfo('Europe/Istanbul')).date():
+    if paid_on > datetime.now(ISTANBUL).date():
         raise ValueError('Ödeme tarihi gelecekte olamaz.')
     opening_id = int(data.get('target_id') or data.get('opening_id'))
     with connect() as db:
@@ -914,13 +920,13 @@ class Handler(BaseHTTPRequestHandler):
                 if not suggestion or data.get('decision') not in ('same','different'):
                     raise ValueError('Eşleştirme güncellenmiş veya karar geçersiz. Listeyi yenileyin.')
                 with connect() as db:
-                    db.execute('INSERT OR REPLACE INTO product_matches VALUES(?,?,?,?,?)',(suggestion['fingerprint'],suggestion['left_key'],suggestion['right_key'],data['decision'],datetime.now(ZoneInfo('Europe/Istanbul')).isoformat()))
+                    db.execute('INSERT OR REPLACE INTO product_matches VALUES(?,?,?,?,?)',(suggestion['fingerprint'],suggestion['left_key'],suggestion['right_key'],data['decision'],datetime.now(ISTANBUL).isoformat()))
             elif self.path == '/api/prices/approve':
                 fingerprint = data['fingerprint']
                 if fingerprint not in {a['fingerprint'] for a in state()['alerts']}:
                     raise ValueError('Fiyat değişimi güncellenmiş. Listeyi yenileyip tekrar kontrol edin.')
                 with connect() as db:
-                    db.execute('INSERT OR IGNORE INTO price_reviews VALUES(?,?)',(fingerprint,datetime.now(ZoneInfo('Europe/Istanbul')).isoformat()))
+                    db.execute('INSERT OR IGNORE INTO price_reviews VALUES(?,?)',(fingerprint,datetime.now(ISTANBUL).isoformat()))
             elif self.path == '/api/ocr':
                 photos = data.get('photos') or ([data['photo']] if data.get('photo') else [])
                 if not isinstance(photos,list) or not 1 <= len(photos) <= 6:

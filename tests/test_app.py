@@ -338,6 +338,10 @@ class LedgerTests(unittest.TestCase):
         with patch.object(sys, '_MEIPASS', str(bundle), create=True):
             self.assertEqual(resource_path('static/index.html'), bundle/'static/index.html')
 
+    def test_istanbul_clock_has_permanent_utc_plus_three_offset(self):
+        self.assertEqual(app.ISTANBUL.utcoffset(datetime(2026, 1, 1)), app.timedelta(hours=3))
+        self.assertEqual(app.ISTANBUL.utcoffset(datetime(2026, 7, 1)), app.timedelta(hours=3))
+
     def test_windows_launcher_uses_installed_turkish_ocr_data(self):
         with tempfile.TemporaryDirectory() as directory:
             language_directory = Path(directory) / 'Sancakli Market' / 'tessdata'
