@@ -185,7 +185,30 @@ def _decimal_text(value):
 
 def _column_text(words, left, right):
     selected = _column_words(words, left, right)
-    return " ".join(word.text for word in sorted(selected, key=lambda w: (w.top, w.left)))
+    return _visual_text(selected)
+
+
+def _visual_text(words):
+    """Read words by visual lines, tolerating small OCR y-coordinate jitter."""
+    if not words:
+        return ""
+    tolerance = max(3, statistics.median(word.height for word in words) * .65)
+    lines = []
+    for word in sorted(words, key=lambda value: (value.center_y, value.left)):
+        line = next(
+            (entry for entry in reversed(lines[-4:]) if abs(entry["center"] - word.center_y) <= tolerance),
+            None,
+        )
+        if line is None:
+            line = {"center": word.center_y, "words": []}
+            lines.append(line)
+        line["words"].append(word)
+        line["center"] = statistics.fmean(value.center_y for value in line["words"])
+    return " ".join(
+        word.text
+        for line in lines
+        for word in sorted(line["words"], key=lambda value: value.left)
+    )
 
 
 def _column_words(words, left, right):
@@ -211,8 +234,8 @@ def _quantity(text):
         )
         if not reversed_match:
             raise ValueError()
-        return _decimal(reversed_match.group(2)), reversed_match.group(1).rstrip(".").lower()
-    return _decimal(match.group(1)), match.group(2).rstrip(".").lower()
+        return _decimal(reversed_match.group(2)), _plain(reversed_match.group(1).rstrip("."))
+    return _decimal(match.group(1)), _plain(match.group(2).rstrip("."))
 
 
 def _amount(text):
@@ -233,6 +256,13 @@ def _same_core(left, right):
         and left["net"] == right["net"]
         and left["vat"] == right["vat"]
     )
+
+
+def _clean_product(value):
+    """Repair only unambiguous package-size glyphs commonly confused by OCR."""
+    value = re.sub(r"(?<=\d[.,]\d)1(?=\s*\d+X\b)", "L", value, flags=re.I)
+    value = re.sub(r"(?<=\d)O(?=KCAL\b)", "0", value, flags=re.I)
+    return re.sub(r"\s+", " ", value).strip()[:500]
 
 
 def _item_from_band(anchor, words, table_left, table_right):
@@ -264,6 +294,11 @@ def _item_from_band(anchor, words, table_left, table_right):
         raise ValueError("sayısal alan")
 
     gross = net + vat
+    # In a valid invoice the printed unit price cannot be a tiny fraction of
+    # the payable unit cost. A discount percentage in a supplier-specific
+    # column used to be mistaken for the unit price here.
+    if quantity * raw_price < gross * Decimal(".5"):
+        raise ValueError("birim fiyat sütunu")
     price = (gross / quantity).quantize(Decimal(".01"), rounding=ROUND_HALF_UP)
     review = ""
     if any(char.isalpha() for char in anchor.code):
@@ -301,7 +336,7 @@ def _item_from_band(anchor, words, table_left, table_right):
         "row_number": anchor.number,
         "line_total": f"{net:.2f}",
         "review": review,
-        "product": re.sub(r"\s+", " ", product_text).strip()[:500],
+        "product": _clean_product(product_text),
         "unit": unit,
         "price": f"{price:.2f}",
         "code": anchor.code,
@@ -368,12 +403,15 @@ def _item_from_geometry(anchor, words):
         and word.right <= quantity_left
         and word is not anchor.code_word
     ]
-    product_text = " ".join(word.text for word in sorted(product_words, key=lambda word: (word.top, word.left)))
+    product_text = _visual_text(product_words)
     if not product_text.strip():
         raise ValueError("ürün adı")
 
     amount_words = [word for word in ordered[unit_index + 1:] if word.left >= quantity_right - 2]
-    amount_text = " ".join(word.text for word in amount_words)
+    # Ruled cells may be fused into one OCR word such as ``KOLİ|284,46``.
+    # Preserve the monetary suffix while still excluding the quantity itself.
+    unit_tail = unit_pattern.split(ordered[unit_index].text, maxsplit=1)[-1]
+    amount_text = " ".join([unit_tail] + [word.text for word in amount_words])
     amount_text = re.sub(r"(?<=\d)([.,])\s+(?=\d)", r"\1", amount_text)
     monetary = []
     for match in re.finditer(r"(?<!\d)\d+(?:[.,]\d+)+(?!\d)", amount_text):
@@ -398,7 +436,7 @@ def _item_from_geometry(anchor, words):
         "row_number": anchor.number,
         "line_total": f"{net:.2f}",
         "review": review,
-        "product": re.sub(r"\s+", " ", product_text).strip()[:500],
+        "product": _clean_product(product_text),
         "unit": unit,
         "price": f"{price:.2f}",
         "code": anchor.code,

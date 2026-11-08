@@ -1,6 +1,6 @@
 import unittest
 
-from invoice_ocr import parse_tsv_table
+from invoice_ocr import parse_tsv_table, _clean_product
 
 
 HEADER = "level\tpage_num\tblock_num\tpar_num\tline_num\tword_num\tleft\ttop\twidth\theight\tconf\ttext\n"
@@ -46,6 +46,12 @@ class TsvBuilder:
 
 
 class InvoiceTsvTests(unittest.TestCase):
+    def test_unambiguous_package_glyphs_are_cleaned(self):
+        self.assertEqual(
+            _clean_product('PET FRK GAZOZ 2.51 6X 20KCAL FE'),
+            'PET FRK GAZOZ 2.5L 6X 20KCAL FE',
+        )
+        self.assertEqual(_clean_product('PET PC KOLA 1.5L 12X 7OKCAL FE'), 'PET PC KOLA 1.5L 12X 70KCAL FE')
     def test_reconstructs_cells_from_separate_blocks_and_wrapped_name(self):
         data = TsvBuilder()
         data.item(1, "8223298", "BENIMO KOMBO KREMALI 96GX18 KL", 18,

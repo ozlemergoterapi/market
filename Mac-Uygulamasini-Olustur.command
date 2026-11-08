@@ -95,7 +95,7 @@ fi
 echo 'Sancaklı Market Mac uygulaması hazırlanıyor...'
 "$market_python" -m venv --clear .mac-build-env
 . .mac-build-env/bin/activate
-python -m pip install --quiet --upgrade pyinstaller pillow
+python -m pip install --quiet --upgrade pyinstaller pillow pillow-heif
 python -m PyInstaller --noconfirm --clean --windowed \
   --name 'Sancakli Market' \
   --osx-bundle-identifier 'tr.sancaklimarket.cari' \

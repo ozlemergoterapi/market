@@ -61,6 +61,13 @@ Fatura Tarihi:
         draft=parse_invoice('Ödenecek Tutar:\nToplam İskonto 739,73 TL\nKDV 120,69 TL')
         self.assertEqual(draft['total'],'')
 
+    def test_quantity_before_spelled_payable_total_does_not_conflict(self):
+        draft=parse_invoice('''Vergiler Dahil Toplam Tutar\n2.283,81 TL
+Ödenecek Tutar\n2.283,81 TL
+Toplam 5,00 Koli; Ödenecek Tutar: ikibinikiyüzseksenüçTL,seksenbirKr
+Kampanya İndirimi: 347,99 TL''')
+        self.assertEqual(draft['total'],'2283.81')
+
     def test_conflicting_totals_and_firms_stay_unselected(self):
         draft=parse_invoice('KOSEOGLU GIDA LTD\nÖdenecek Tutar 100,00 TL\nÖdenecek Tutar 200,00 TL',
                             [dict(id=1,name='Köseoğlu Eti'),dict(id=2,name='Köseoğlu Toptan')])

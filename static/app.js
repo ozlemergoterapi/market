@@ -297,6 +297,7 @@ function fileDataUrl(file){
   return new Promise((resolve,reject)=>{const reader=new FileReader();reader.onload=()=>resolve(reader.result);reader.onerror=()=>reject(new Error('Dosya okunamadı.'));reader.readAsDataURL(file);});
 }
 function isPdfFile(file){return file.type==='application/pdf'||file.name.toLocaleLowerCase('tr').endsWith('.pdf');}
+function isHeicFile(file){return ['image/heic','image/heif'].includes(file.type)||/\.hei[cf]$/i.test(file.name);}
 async function pdfPageImages(file,availablePages){
   const pdfjs=await loadPdfJs();
   const loading=pdfjs.getDocument({data:new Uint8Array(await file.arrayBuffer())});
@@ -499,7 +500,7 @@ $('#photo').onchange=async e=>{
   if(photoLoading||$('#read-photo').disabled){$('#ocr-status').textContent='Devam eden fotoğraf işleminin bitmesini bekleyin.';return;}
   const existingBytes=selectedPhotos.reduce((sum,p)=>sum+photoBytes(p),0);
   const imageTypes=['image/jpeg','image/png','image/webp'];
-  if(existingBytes+files.reduce((sum,f)=>sum+f.size,0)>8*1024*1024||files.some(file=>!isPdfFile(file)&&!imageTypes.includes(file.type))){$('#ocr-status').textContent='Eklenemedi. PDF, JPEG, PNG veya WebP seçin; toplam dosya boyutu en fazla 8 MB olabilir. Mevcut sayfalarınız korundu.';return;}
+  if(existingBytes+files.reduce((sum,f)=>sum+f.size,0)>8*1024*1024||files.some(file=>!isPdfFile(file)&&!isHeicFile(file)&&!imageTypes.includes(file.type))){$('#ocr-status').textContent='Eklenemedi. PDF, HEIC, JPEG, PNG veya WebP seçin; toplam dosya boyutu en fazla 8 MB olabilir. Mevcut sayfalarınız korundu.';return;}
   const generation=ocrGeneration;
   photoLoading=true;$('#add-photo').disabled=true;$('#read-photo').disabled=true;
   try{

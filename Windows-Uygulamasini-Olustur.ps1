@@ -102,7 +102,7 @@ Download-Verified `
 Write-Host 'Sancaklı Market Windows uygulaması hazırlanıyor...'
 & $python -m venv --clear .windows-build-env
 $venvPython = Join-Path $PSScriptRoot '.windows-build-env\Scripts\python.exe'
-& $venvPython -m pip install --quiet --upgrade pyinstaller pillow
+& $venvPython -m pip install --quiet --upgrade pyinstaller pillow pillow-heif
 if ($LASTEXITCODE -ne 0) { throw 'Uygulama paketleme araçları indirilemedi.' }
 & $venvPython -m PyInstaller --noconfirm --clean --windowed --onefile `
     --name 'Sancakli-Market' `

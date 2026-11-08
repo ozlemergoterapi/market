@@ -1,6 +1,7 @@
 """Market cari takip — Python 3.11+, SQLite, bağımlılıksız yerel sunucu."""
 import hashlib
 import base64
+import io
 import json
 import os
 import re
@@ -254,11 +255,28 @@ def clear_draft(key):
 def photo(value):
     if not value:
         return None
-    if not isinstance(value, str) or not re.match(r'^data:image/(jpeg|png|webp);base64,', value):
-        raise ValueError('JPEG, PNG veya WebP fotoğraf seçin.')
+    if not isinstance(value, str) or not re.match(r'^data:image/(jpeg|png|webp|heic|heif);base64,', value):
+        raise ValueError('HEIC, JPEG, PNG veya WebP fotoğraf seçin.')
     raw = base64.b64decode(value.split(',', 1)[1], validate=True)
     if len(raw) > 8 * 1024 * 1024:
         raise ValueError('Fotoğraf en fazla 8 MB olabilir.')
+    if re.match(r'^data:image/(heic|heif);', value):
+        try:
+            from PIL import Image, ImageOps
+            from pillow_heif import register_heif_opener
+            register_heif_opener()
+            with Image.open(io.BytesIO(raw)) as source:
+                converted = ImageOps.exif_transpose(source).convert('RGB')
+                converted.thumbnail((3600, 5200), Image.Resampling.LANCZOS)
+                output = io.BytesIO()
+                converted.save(output, 'JPEG', quality=92, optimize=True)
+            raw = output.getvalue()
+            value = 'data:image/jpeg;base64,' + base64.b64encode(raw).decode('ascii')
+        except (ImportError, OSError, ValueError) as error:
+            raise ValueError(
+                'HEIC fotoğraf dönüştürülemedi. Güncel kurulum dosyasını yeniden '
+                'çalıştırın veya fotoğrafı JPEG olarak ekleyin.'
+            ) from error
     return value
 
 

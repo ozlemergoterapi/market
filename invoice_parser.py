@@ -122,7 +122,7 @@ def parse_invoice(text, firms=()):
         if kind:
             window = [line]
             for following in lines[index+1:index+3]:
-                if label_kind(following) or re.search(r'toplam|iskonto|kdv|vkn|tckn|irsaliye',normalized(following)):
+                if label_kind(following) or re.search(r'toplam|iskonto|indirim|kampanya|kdv|vkn|tckn|irsaliye',normalized(following)):
                     break
                 window.append(following)
             for offset,value_line in enumerate(window):
@@ -132,9 +132,20 @@ def parse_invoice(text, firms=()):
                 elif kind=='issued':
                     value=parse_date(value_line)
                 else:
-                    amounts=re.findall(AMOUNT,value_line)
+                    amount_source=value_line
+                    # A sentence can mention a quantity before the payable
+                    # label ("Toplam 5,00 Koli; Ödenecek Tutar: ..."). Never
+                    # accept that earlier quantity as the invoice total.
+                    if label_kind(value_line)=='total':
+                        total_label=re.search(
+                            r'(?:[oö]denecek\s*(?:tutar|toplam)|vergiler\s*dahil\s*toplam(?:\s*tutar)?|genel\s*toplam)',
+                            value_line,re.I,
+                        )
+                        if total_label:
+                            amount_source=value_line[total_label.end():]
+                    amounts=re.findall(AMOUNT,amount_source)
                     if not amounts:
-                        integer=re.search(r'(?<![\d.,])(\d+)\s*(?:TL|TRY|₺)\b',value_line,re.I)
+                        integer=re.search(r'(?<![\d.,])(\d+)\s*(?:TL|TRY|₺)\b',amount_source,re.I)
                         amounts=[integer[1]] if integer else []
                     if amounts:
                         amount=decimal_value(amounts[-1])
