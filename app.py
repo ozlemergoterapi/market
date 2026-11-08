@@ -816,6 +816,13 @@ def delete_payment(data):
 
 
 class Handler(BaseHTTPRequestHandler):
+    def log_message(self, format, *args):
+        # PyInstaller's windowed Windows executable intentionally has no
+        # stderr stream. BaseHTTPRequestHandler otherwise crashes while
+        # logging every successful response, before sending it to the browser.
+        if sys.stderr is not None:
+            super().log_message(format, *args)
+
     def respond(self, value, status=200):
         raw = json.dumps(value, ensure_ascii=False).encode()
         self.send_response(status)

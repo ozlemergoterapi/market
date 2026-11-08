@@ -342,6 +342,10 @@ class LedgerTests(unittest.TestCase):
         self.assertEqual(app.ISTANBUL.utcoffset(datetime(2026, 1, 1)), app.timedelta(hours=3))
         self.assertEqual(app.ISTANBUL.utcoffset(datetime(2026, 7, 1)), app.timedelta(hours=3))
 
+    def test_windowed_server_logging_tolerates_missing_stderr(self):
+        with patch.object(sys, 'stderr', None):
+            app.Handler.log_message(object(), 'GET %s', '/')
+
     def test_windows_launcher_uses_installed_turkish_ocr_data(self):
         with tempfile.TemporaryDirectory() as directory:
             language_directory = Path(directory) / 'Sancakli Market' / 'tessdata'
