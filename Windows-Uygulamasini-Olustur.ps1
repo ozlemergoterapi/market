@@ -4,11 +4,17 @@ Set-Location $PSScriptRoot
 
 function Find-Python {
     if (Get-Command py -ErrorAction SilentlyContinue) {
-        $resolved = (& py -3 -c "import sys; raise SystemExit(sys.version_info < (3,11)); print(sys.executable)" 2>$null | Select-Object -Last 1)
+        try {
+            $resolved = (& py -3 -c "import sys; raise SystemExit(sys.version_info < (3,11)); print(sys.executable)" 2>$null | Select-Object -Last 1)
+        } catch { $resolved = $null }
         if ($LASTEXITCODE -eq 0 -and $resolved -and (Test-Path $resolved)) { return $resolved }
     }
-    if (Get-Command python -ErrorAction SilentlyContinue) {
-        $resolved = (& python -c "import sys; raise SystemExit(sys.version_info < (3,11)); print(sys.executable)" 2>$null | Select-Object -Last 1)
+    $pythonCommand = Get-Command python -ErrorAction SilentlyContinue
+    $storeAlias = Join-Path $env:LOCALAPPDATA 'Microsoft\WindowsApps\python.exe'
+    if ($pythonCommand -and $pythonCommand.Source -ne $storeAlias) {
+        try {
+            $resolved = (& $pythonCommand.Source -c "import sys; raise SystemExit(sys.version_info < (3,11)); print(sys.executable)" 2>$null | Select-Object -Last 1)
+        } catch { $resolved = $null }
         if ($LASTEXITCODE -eq 0 -and $resolved -and (Test-Path $resolved)) { return $resolved }
     }
     $candidates = @(
