@@ -22,6 +22,24 @@ class LedgerTests(unittest.TestCase):
         app.DB = self.original
         self.tmp.cleanup()
 
+    @patch('app.shutil.which', return_value=None)
+    def test_ocr_engine_explains_missing_program(self, _which):
+        with self.assertRaisesRegex(ValueError, 'kurulum|Kurulum|Mac-Uygulamasini'):
+            app.ocr_engine()
+
+    @patch('app.subprocess.run')
+    @patch('app.shutil.which', return_value='/opt/homebrew/bin/tesseract')
+    def test_ocr_engine_requires_turkish_language(self, _which, run):
+        run.return_value.stdout = 'List of available languages\neng\n'
+        with self.assertRaisesRegex(ValueError, 'Türkçe'):
+            app.ocr_engine()
+
+    @patch('app.subprocess.run')
+    @patch('app.shutil.which', return_value='/opt/homebrew/bin/tesseract')
+    def test_ocr_engine_selects_installed_languages(self, _which, run):
+        run.return_value.stdout = 'List of available languages\ntur\neng\n'
+        self.assertEqual(app.ocr_engine(), ('/opt/homebrew/bin/tesseract', 'tur+eng'))
+
     def invoice(self, **changes):
         data = dict(firm_id=1,number='F001',issued='2026-01-20',days=20,total='1000.50',duplicate_confirmed=True,
                     items=[dict(product='Marka süt',unit='1 litre / adet',price='35.00')])

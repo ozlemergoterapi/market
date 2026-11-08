@@ -455,7 +455,9 @@ async function prepareOcrPhotos(photos,includeOriginals=false){
     // Two complementary readings recover thin characters that can disappear
     // during contrast preparation (for example a row number inside a grid).
     if(includeOriginals){
-      const combined=[...photos,...prepared.filter(photo=>!photos.includes(photo))];
+      // Read the cleaned document first, then retain the original as a safety
+      // copy. Cropping can occasionally miss a header or a faint table edge.
+      const combined=[...prepared,...photos.filter(photo=>!prepared.includes(photo))];
       if(combined.length<=6&&combined.reduce((sum,p)=>sum+photoBytes(p),0)<=8*1024*1024)return combined;
     }
     if(prepared.length&&prepared.length<=6&&prepared.reduce((sum,p)=>sum+photoBytes(p),0)<=8*1024*1024)return prepared;
@@ -537,12 +539,17 @@ $('#read-photo').onclick=async()=>{
   form.querySelector('button.primary').disabled=true;
   try{
     const originalPhotos=selectedPhotos.length?selectedPhotos:[requestedPhoto];
-    const ocrPhotos=await prepareOcrPhotos(originalPhotos,originalPhotos.every(photo=>pdfOcrPhotos.has(photo)));
+    // Camera photos need both the cleaned image and the untouched original.
+    // This also protects screenshots whose browser bars confuse auto-cropping.
+    const ocrPhotos=await prepareOcrPhotos(originalPhotos,true);
     if(generation!==ocrGeneration||selectedPhoto!==requestedPhoto||!$('#invoice-dialog').open)return;
     const textLayers=originalPhotos.map(photo=>pdfTextLayers.get(photo)).filter(Boolean);
     const result=await api('ocr',{photos:ocrPhotos,pdf_text_layers:textLayers});
     if(generation!==ocrGeneration||selectedPhoto!==requestedPhoto||!$('#invoice-dialog').open)return;
     const draft=result.draft;
+    if(!draft.items.length&&!draft.number&&!draft.issued&&!draft.total&&!draft.supplier){
+      throw new Error('Fotoğraftan fatura bilgisi okunamadı. Faturayı dik, net ve yakından çekip yeniden deneyin.');
+    }
     lastOcrSupplier=draft.supplier||'';
     $('#ocr-text').value=result.text;$('#ocr-text').hidden=false;$('#copy-ocr').hidden=false;
     for(const key of ['number','issued','total']){
@@ -572,7 +579,7 @@ $('#read-photo').onclick=async()=>{
     renderImportCheck();$('.confirm input').checked=false;
     $('#ocr-review').hidden=false;
     $('#ocr-review').textContent=(draft.supplier?'Okunan firma: '+draft.supplier+'\n':'')+draft.warnings.join('\n');
-    $('#ocr-status').textContent=`${draft.items.length} ürün satırı ve okunabilen fatura alanları dolduruldu. Henüz kaydedilmedi. Tüm sayfaların eksiksiz okunduğunu kontrol edin; boş alanları tamamlayın. Birim fiyatlar satır tutarı + KDV üzerinden hesaplandı.`;scheduleFormDraft(form);
+    $('#ocr-status').textContent=`Türkçe okuma motoru çalıştı. ${draft.items.length} ürün satırı ve okunabilen fatura alanları dolduruldu. Henüz kaydedilmedi. Tüm sayfaların eksiksiz okunduğunu kontrol edin; boş alanları tamamlayın. Birim fiyatlar satır tutarı + KDV üzerinden hesaplandı.`;scheduleFormDraft(form);
   }catch(e){$('#ocr-status').textContent=e.message;}
   finally{$('#read-photo').disabled=false;$('#add-photo').disabled=false;form.querySelector('button.primary').disabled=false;}
 };

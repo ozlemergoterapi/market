@@ -4,6 +4,7 @@ import base64
 import json
 import os
 import re
+import shutil
 import sqlite3
 import statistics
 import subprocess
@@ -325,7 +326,35 @@ def pdf_text_readings(layers, firms):
     return [positioned,plain], '\n'.join(visible_pages)
 
 
-def run_tesseract(pic, lang, mode, with_tsv=True):
+def ocr_engine():
+    """Return the OCR executable and installed languages with actionable errors."""
+    executable = shutil.which('tesseract')
+    if not executable:
+        raise ValueError(
+            'Fotoğraf okuma motoru bulunamadı. Mac-Uygulamasini-Olustur.command '
+            'dosyasını yeniden çalıştırın; mevcut kayıtlarınız silinmez.'
+        )
+    try:
+        result = subprocess.run(
+            [executable, '--list-langs'], capture_output=True, text=True,
+            timeout=15, check=True,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise ValueError('Fotoğraf okuma motoru yanıt vermedi. Uygulamayı kapatıp yeniden açın.') from error
+    except subprocess.SubprocessError as error:
+        raise ValueError(
+            'Fotoğraf okuma motoru başlatılamadı. Kurulum dosyasını yeniden çalıştırın.'
+        ) from error
+    languages = set(result.stdout.split())
+    if 'tur' not in languages:
+        raise ValueError(
+            'Türkçe fotoğraf okuma paketi eksik. Mac-Uygulamasini-Olustur.command '
+            'dosyasını yeniden çalıştırın; mevcut kayıtlarınız silinmez.'
+        )
+    return executable, 'tur+eng' if 'eng' in languages else 'tur'
+
+
+def run_tesseract(pic, lang, mode, with_tsv=True, executable='tesseract'):
     """Read one prepared document region, optionally retaining word positions."""
     match = re.match(r'^data:image/(jpeg|png|webp);base64,', pic)
     if not match:
@@ -337,15 +366,24 @@ def run_tesseract(pic, lang, mode, with_tsv=True):
         output = Path(directory) / 'reading'
         source.write_bytes(raw)
         command = [
-            'tesseract', str(source), str(output), '-l', lang,
+            executable, str(source), str(output), '-l', lang,
             '--psm', str(mode), '--dpi', '300',
             '-c', 'preserve_interword_spaces=1', 'txt',
         ]
         if with_tsv:
             command.append('tsv')
-        read = subprocess.run(command, capture_output=True, text=True, timeout=60)
+        try:
+            read = subprocess.run(command, capture_output=True, text=True, timeout=60)
+        except subprocess.TimeoutExpired as error:
+            raise ValueError(
+                'Fotoğrafın okunması bir dakikayı aştı. Fotoğrafı yalnızca fatura görünecek '
+                'biçimde kırpıp yeniden deneyin.'
+            ) from error
         if read.returncode:
-            raise ValueError('Bir fotoğraf okunamadı. Daha net JPEG veya PNG deneyin.')
+            raise ValueError(
+                'Bir fotoğraf okunamadı. Fotoğrafı dik, net ve yalnızca fatura görünecek '
+                'biçimde yeniden ekleyin.'
+            )
         text_path = output.with_suffix('.txt')
         tsv_path = output.with_suffix('.tsv')
         text = text_path.read_text(encoding='utf-8', errors='replace') if text_path.exists() else ''
@@ -822,8 +860,7 @@ class Handler(BaseHTTPRequestHandler):
                 photos = [photo(p) for p in photos]
                 if not all(photos):
                     raise ValueError('Fotoğraf verisi geçersiz.')
-                languages = subprocess.run(['tesseract','--list-langs'],capture_output=True,text=True,check=True).stdout
-                lang = 'tur+eng' if 'tur' in languages.split() else 'eng'
+                executable, lang = ocr_engine()
                 with connect() as db:
                     firms = [dict(r) for r in db.execute('''SELECT id,name FROM firms
                       UNION ALL SELECT firm_id AS id,supplier_alias AS name FROM firm_ocr_profiles''')]
@@ -842,7 +879,7 @@ class Handler(BaseHTTPRequestHandler):
                     def core(item):
                         return tuple(str(item.get(key,'')) for key in ('code','quantity','line_total','net','vat'))
                     for index, pic in enumerate(photos, 1):
-                        page_text, page_tsv = run_tesseract(pic, lang, mode, with_tsv)
+                        page_text, page_tsv = run_tesseract(pic, lang, mode, with_tsv, executable)
                         visible_text.append(f'--- Görsel {index} · OCR düzeni {mode} ---\n{page_text}')
                         plain = parse_invoice(page_text, firms)
                         if page_tsv:
@@ -897,12 +934,17 @@ class Handler(BaseHTTPRequestHandler):
                     draft = merge_readings(readings)
                 if not all(draft[key] for key in ('number', 'issued', 'total')):
                     for index, pic in enumerate(photos, 1):
-                        page_text, _ = run_tesseract(pic, lang, 3, False)
+                        page_text, _ = run_tesseract(pic, lang, 3, False, executable)
                         visible_text.append(f'--- Görsel {index} · üst bilgi okuması ---\n{page_text}')
                         readings.append(parse_invoice(page_text, firms))
                         draft = merge_readings(readings)
                         if all(draft[key] for key in ('number', 'issued', 'total')):
                             break
+                if not any(value.partition('\n')[2].strip() for value in visible_text):
+                    raise ValueError(
+                        'Fotoğrafta okunabilir yazı bulunamadı. Faturayı dik tutup yansıma olmadan, '
+                        'yazılar net görünecek yakınlıkta yeniden çekin.'
+                    )
                 return self.respond({'text':'\n'.join(visible_text),'language':lang,'draft':draft})
             else:
                 return self.respond({'error':'Bulunamadı.'},404)
