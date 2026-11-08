@@ -109,3 +109,48 @@ Kampanya İndirimi: 347,99 TL''')
     def test_garbled_quantity_is_not_guessed(self):
         draft=parse_invoice('1 1234567 URUN 200G I8 Adet 27,7200 TL % 1,00 4,69 TL 470,13 TL')
         self.assertEqual(draft['items'],[])
+
+    def test_code_less_supplier_table_uses_net_then_vat_columns(self):
+        draft=parse_invoice('''NİSAN TEDARİK GIDA LTD ŞTİ
+Fatura No ISN12026000000480
+Fatura Tarihi 19.10.2026
+1 PAKET INDOMIE SPESİYAL NOODLE 75G 1 Koli 636,00 2,00 12,72 1,00 6,23 623,28
+2 PAKET INDOMIE SEBZE ÇEŞNİLİ NOODLE 75G 1 Koli 636,00 2,00 12,72 1,00 6,23 623,28
+3 BARDAK INDOMIE NOODLES KÖRİ 60G 1 Koli 810,00 6,00 48,60 1,00 7,61 761,40
+Genel Toplam 2.028,04 TL''')
+        self.assertEqual([item['product'] for item in draft['items']], [
+            'PAKET INDOMIE SPESİYAL NOODLE 75G',
+            'PAKET INDOMIE SEBZE ÇEŞNİLİ NOODLE 75G',
+            'BARDAK INDOMIE NOODLES KÖRİ 60G',
+        ])
+        self.assertEqual([item['net'] for item in draft['items']], ['623.28','623.28','761.40'])
+        self.assertEqual([item['vat'] for item in draft['items']], ['6.23','6.23','7.61'])
+        self.assertEqual(draft['coverage']['errors'],[])
+
+    def test_barcode_receipt_distributes_summary_vat_and_reads_g_total(self):
+        draft=parse_invoice('''GÖZBAŞI GIDA
+Fatura No F182026000004222
+Fatura Tarihi 04.11.2026
+117412 AYRAN 1 L 3,000 AD 44,850 134,55
+117811 AYRAN 2L 3,000 AD 82,080 246,24
+211300 KAYMAKSIZ YGR 500 G 4,000 AD 40,395 161,58
+212512 KAYMAKSIZ YGR 1000 G 4,000 AD 78,368 313,47
+612911 HÜPTRİK ÇİLEKLİ 24x35 1,000 AD 95,050 95,05
+G.Toplam : 960,40 TL''')
+        self.assertEqual(draft['total'],'960.40')
+        self.assertEqual(len(draft['items']),5)
+        self.assertEqual(draft['items'][0]['product'],'AYRAN 1 L')
+        self.assertEqual(draft['coverage']['errors'],[])
+
+    def test_wrapped_barcode_receipt_preserves_name_and_drops_page_marker(self):
+        draft=parse_invoice('''DİLİKOĞLU GIDA
+Fatura No A042026000002212
+Fatura Tarihi 05.11.2026
+690787261033 BOL TUZLU AY ÇEKİRDEĞİ 180 GR
+33,75 TL PK 24 810,00 TL
+690787231036 EKŞİ KAPLAMALI YER FISTIĞI 70 GR 2
+19,50 TL PK 4 78,00 TL
+G.Toplam : 896,88 TL''')
+        self.assertEqual(draft['items'][1]['product'],'EKŞİ KAPLAMALI YER FISTIĞI 70 GR')
+        self.assertEqual(draft['items'][1]['code'],'690787231036')
+        self.assertEqual(draft['coverage']['errors'],[])

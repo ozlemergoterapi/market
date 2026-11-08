@@ -87,11 +87,11 @@ def label_kind(line):
         return 'number'
     if 'faturatarih' in compact or 'duzenlemetarih' in compact:
         return 'issued'
-    for canonical in ('faturatarihi','belgeno','faturano','odenecektutar','vergilerdahiltoplamtutar','geneltoplam'):
+    for canonical in ('faturatarihi','belgeno','faturano','odenecektutar','vergilerdahiltoplamtutar','geneltoplam','gtoplam'):
         # Compare label prefixes, not whole paragraphs or arbitrary monetary rows.
         if compact and SequenceMatcher(None,compact[:len(canonical)+1],canonical).ratio() >= .88:
             return {'faturatarihi':'issued','belgeno':'number','faturano':'number'}.get(canonical,'total')
-    if any(x in compact for x in ('odenecektutar','odenecektoplam','vergilerdahiltoplam','geneltoplam')):
+    if any(x in compact for x in ('odenecektutar','odenecektoplam','vergilerdahiltoplam','geneltoplam','gtoplam')):
         return 'total'
     return None
 
@@ -113,6 +113,7 @@ def invoice_number(text):
 
 def parse_invoice(text, firms=()):
     lines = [re.sub(r'[|\t]+', ' ', line).strip() for line in text.splitlines() if line.strip()]
+    lines = [re.sub(r'^(\d{1,3})\s*[:.)]\s*(?=\d{5,14}\b)',r'\1 ',line) for line in lines]
     lines = [re.sub(r'(?<=\d)([.,])\s+(?=\d)',r'\1',line) for line in lines]
     result = dict(number='', issued='', total='', supplier='', firm_id=None, items=[], warnings=[], sources={})
     candidates = dict(number=[],issued=[],total=[])
@@ -202,12 +203,103 @@ def parse_invoice(text, firms=()):
     if current:
         blocks.append(current)
     parsed_items, invalid_rows = [], set()
+
+    def append_item(row_number, code, product, quantity, unit, raw_price, net, vat=Decimal('0'), review=''):
+        try:
+            qty=Decimal(str(quantity));raw=Decimal(str(raw_price));net_value=Decimal(str(net));vat_value=Decimal(str(vat))
+            if qty<=0 or raw<=0 or net_value<=0 or vat_value<0:
+                raise ValueError()
+            price=((net_value+vat_value)/qty).quantize(Decimal('.01'),rounding=ROUND_HALF_UP)
+            parsed_items.append(dict(row_number=int(row_number),line_total=str(net_value),review=review,product=product.strip()[:500],unit=normalized(unit),price=str(price),code=code,
+                                     quantity=str(qty),source_price=str(raw),net=str(net_value),vat=str(vat_value)))
+        except (InvalidOperation,ValueError):
+            invalid_rows.add(int(row_number))
+
+    # Tables without a product-code column are common on supplier PDFs. Parse
+    # complete visual rows directly from the right-side quantity and amounts.
+    for line in lines:
+        candidate=re.sub(r'^[^0-9]*','',line)
+        match=re.match(r'(\d{1,3})\s+(.+?)\s+(\d+(?:[.,]\d+)?)\s*(Adet|Ad\.?|Kg|Koli|KL|Lt|Litre|Paket|Kutu)\b\s+(.+)',candidate,re.I)
+        if not match:
+            continue
+        row_number,product,quantity,unit,tail=match.groups()
+        product_lead=re.match(r'([A-Z0-9]{5,14})\b',product,re.I)
+        if product_lead and sum(char.isdigit() for char in product_lead.group(1))>=5:
+            continue
+        values=[]
+        for raw in re.findall(r'\d+(?:[.,]\d+)*',tail):
+            try: values.append(decimal_value(raw))
+            except InvalidOperation: pass
+        if len(values)<2:
+            continue
+        raw_price=values[0]
+        # In code-less supplier tables the last value is the printed net line
+        # amount and the preceding one is VAT. Earlier values can be discount
+        # percentages/amounts and must not become the payable line total.
+        net=values[-1]
+        vat=values[-2] if len(values)>=4 else Decimal('0')
+        if vat>net: vat=Decimal('0')
+        append_item(row_number,'',product,decimal_value(quantity),unit,raw_price,net,vat,'Ürün kodu bulunmayan tablo satırı fotoğrafla kontrol edilmeli.')
+
+    # Narrow receipts can print the product first and its quantity/amounts on
+    # the following line. Preserve that printed name instead of guessing it.
+    printed_tax=Decimal('0')
+    tax_match=re.search(r'kdv[^0-9%]{0,8}%\s*(\d+(?:[.,]\d+)?)',normalized(text),re.I)
+    if tax_match:
+        try: printed_tax=decimal_value(tax_match.group(1))/100
+        except InvalidOperation: pass
+    receipt_row=1
+    for index,line in enumerate(lines[:-1]):
+        following=lines[index+1]
+        detail=re.search(r'(?:^|\s)x\s*(\d+(?:[.,]\d+)?)\s*(adet|kg|koli|kl|paket|kutu)\b(.*)',following,re.I)
+        if not detail or re.search(r'fatura|toplam|bakiye|vergi|vkn|tckn',normalized(line)):
+            continue
+        quantity,unit,tail=detail.groups();amounts=re.findall(AMOUNT,tail)
+        if not amounts:
+            continue
+        net=decimal_value(amounts[-1])
+        raw_price=decimal_value(amounts[-2]) if len(amounts)>=2 else (net/decimal_value(quantity))
+        vat=(net*printed_tax).quantize(Decimal('.01'),rounding=ROUND_HALF_UP) if printed_tax else Decimal('0')
+        append_item(receipt_row,'',line,decimal_value(quantity),unit,raw_price,net,vat,'Fiş düzeniyle okundu; kod bulunmadı ve satır fotoğrafla kontrol edilmeli.')
+        receipt_row+=1
+
+    # Barcode/code-first receipts omit a row-number column. They either print
+    # amounts on the same line or on the line immediately after the product.
+    code_receipt_row=1
+    for index,line in enumerate(lines):
+        candidate=re.sub(r'^[^0-9]*','',line)
+        inline=re.match(r'^(\d{6,14})\s+(.+?)\s+(?:\d+[.,]\d+\s*[tT]\s+)?(\d+(?:[.,]\d+)?)\s*(AD|ADET|PK|PAKET|KOLI|KL)\s+(\d+[.,]\d+)\s+(\d+[.,]\d+)',candidate,re.I)
+        if inline:
+            code,product,quantity,unit,raw_price,net=inline.groups()
+            append_item(code_receipt_row,code,product,decimal_value(quantity),unit,decimal_value(raw_price),decimal_value(net),Decimal('0'),'Barkodlu fiş satırı olarak okundu; toplam KDV satırlara dağıtıldı.')
+            code_receipt_row+=1;continue
+        product_match=re.match(r'^(\d{6,14})\s+(.+\S)',candidate)
+        if not product_match or index+1>=len(lines):
+            continue
+        detail=re.search(r'(\d+[.,]\d+)\s*TL\s*(PK|PAKET|AD|ADET|KOLI|KL)\s+(\d+(?:[.,]\d+)?)\s+(?:\d+(?:[.,]\d+)?\s*%\s+)?(\d+[.,]\d+)\s*TL',lines[index+1],re.I)
+        if not detail:
+            continue
+        raw_price,unit,quantity,net=detail.groups();code,product=product_match.groups()
+        # A detached row/page marker is sometimes appended to a receipt name.
+        # Keep digits that belong to the printed name or pack size, but discard
+        # a single isolated marker at the very end.
+        product=re.sub(r'\s+\d{1,2}\s*$','',product)
+        append_item(code_receipt_row,code,product,decimal_value(quantity),unit,decimal_value(raw_price),decimal_value(net),Decimal('0'),'Barkodlu fiş satırı olarak okundu; toplam KDV satırlara dağıtıldı.')
+        code_receipt_row+=1
     for block in blocks:
         row_number = int(block.split()[0])
         if not 1 <= row_number <= 500:
             continue
         match = re.match(r'^\d{1,3}\s+(\d{5,14})\s+(.+?)\s+(\d+(?:[.,]\d+)*)\s*(Adet|Ad\.?|Kg|Koli|Lt|Litre)\s+(.+)', block, re.I)
         if not match:
+            # Receipt order: row, code, quantity/unit, price, total; product
+            # description wraps onto the next printed line.
+            receipt_amount=r'\d+[.,]\d{1,2}'
+            receipt=re.match(r'^\d{1,3}\s+(\d{5,14})\s+(?:[1A4]\s*K[I1L]|[1A4]\s*(?:Koli|Adet|Kg|Paket|Kutu))\s+('+receipt_amount+r')\s+('+receipt_amount+r')\s+(.+)',block,re.I)
+            if receipt:
+                code,raw_price,net,product=receipt.groups()
+                append_item(row_number,code,product,'1','koli',decimal_value(raw_price),decimal_value(net),Decimal('0'),'Dar fiş satırı olarak okundu; toplam iskonto ve KDV varsa kontrol edilmeli.')
+                continue
             invalid_rows.add(row_number)
             result['warnings'].append('Bir ürün satırı okunamadı; fotoğrafla karşılaştırın.')
             continue
@@ -233,12 +325,23 @@ def parse_invoice(text, firms=()):
             result['warnings'].append('Bir ürünün son birim fiyatı hesaplanamadı; elle kontrol edin.')
     result['items'], duplicate_warnings = _consolidate_items(parsed_items, invalid_rows)
     result['warnings'].extend(duplicate_warnings)
+    # Some narrow receipts show VAT only in the summary. Distribute that exact
+    # printed difference proportionally so item costs reconcile to the payable
+    # amount; the final row absorbs the one-cent rounding remainder.
+    if result['total'] and result['items'] and all(Decimal(item['vat'])==0 for item in result['items']) and all('fis' in normalized(item.get('review','')) for item in result['items']):
+        net_sum=sum(Decimal(item['net']) for item in result['items'])
+        difference=Decimal(result['total'])-net_sum
+        if net_sum>0 and Decimal('0')<difference<=net_sum*Decimal('.20'):
+            remaining=difference
+            for index,item in enumerate(result['items']):
+                vat=remaining if index+1==len(result['items']) else (difference*Decimal(item['net'])/net_sum).quantize(Decimal('.01'),rounding=ROUND_HALF_UP)
+                remaining-=vat;item['vat']=str(vat);item['price']=str(((Decimal(item['net'])+vat)/Decimal(item['quantity'])).quantize(Decimal('.01'),rounding=ROUND_HALF_UP))
     result['warnings'].extend('Ürün kodu '+item['code']+': '+item['review'] for item in result['items'] if item.get('review'))
     # A row starts with a sequence number followed by a numeric product code.
     # Product descriptions can also begin with values such as "120 GX20KL";
     # requiring at least five digits in the code prevents those continuations
     # from inflating the expected row count.
-    detected = set()
+    detected = {int(item['row_number']) for item in result['items']}
     for line in lines:
         match = re.match(r'^(\d{1,3})\s+([A-Z0-9]{5,14})\b', line, re.I)
         if match and sum(character.isdigit() for character in match[2]) >= 5:

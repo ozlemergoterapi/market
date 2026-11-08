@@ -62,6 +62,16 @@ class Anchor:
         return (self.ordinal.center_y + self.code_word.center_y) / 2
 
 
+@dataclass(frozen=True)
+class RowAnchor:
+    number: int
+    ordinal: Word
+
+    @property
+    def center_y(self):
+        return self.ordinal.center_y
+
+
 def _plain(value):
     value = value.replace("ı", "i").replace("İ", "I")
     return "".join(
@@ -159,6 +169,49 @@ def _anchors(words):
             continue
         result.append(anchor)
     return result
+
+
+def _row_anchors(words):
+    """Find a coherent 1..N row-number column even when no product code exists."""
+    if not words:
+        return []
+    page_width = max(word.right for word in words)
+    candidates = []
+    for word in words:
+        clean = re.sub(r"[^0-9]", "", word.text)
+        if not clean or re.search(r"[A-Za-z]", word.text):
+            continue
+        number = int(clean)
+        if 1 <= number <= 500 and word.center_x < page_width * .20:
+            candidates.append(RowAnchor(number, word))
+    if not candidates:
+        return []
+    # Row numbers share one narrow x column. Select the densest alignment so
+    # dates, percentages and totals at the page edge cannot inflate row count.
+    tolerance = max(8, page_width * .025)
+    best = max(
+        candidates,
+        key=lambda pivot: sum(abs(value.ordinal.center_x - pivot.ordinal.center_x) <= tolerance for value in candidates),
+    )
+    aligned = [value for value in candidates if abs(value.ordinal.center_x - best.ordinal.center_x) <= tolerance]
+    by_number = {}
+    for value in sorted(aligned, key=lambda entry: entry.center_y):
+        by_number.setdefault(value.number, value)
+    if 1 not in by_number:
+        return []
+    result = []
+    number = 1
+    previous_y = -1
+    # Allow a single missed row number; OCR modes are merged later.
+    while number <= max(by_number):
+        value = by_number.get(number)
+        if value and value.center_y > previous_y:
+            result.append(value)
+            previous_y = value.center_y
+        elif number > 1 and number + 1 not in by_number:
+            break
+        number += 1
+    return result if len(result) >= 2 else []
 
 
 def _decimal(text):
@@ -447,6 +500,111 @@ def _item_from_geometry(anchor, words):
     }, confidence
 
 
+def _item_without_code(anchor, words):
+    """Extract a visually aligned row whose supplier table has no code column."""
+    ordered = sorted(words, key=lambda word: (word.center_x, word.top))
+    unit_pattern = re.compile(r"(?:Adet|Ad\.?|Kg|Koli|KL|Lt|Litre|Paket|Kutu)", re.IGNORECASE)
+    quantity = unit = None
+    quantity_left = quantity_right = None
+    unit_word = None
+    for index, word in enumerate(ordered):
+        if not unit_pattern.search(word.text):
+            continue
+        for start, end in ((index - 2, index + 1), (index - 1, index + 1), (index, index + 2)):
+            sample_words = ordered[max(start, 0):min(end, len(ordered))]
+            try:
+                candidate, candidate_unit = _quantity(" ".join(value.text for value in sample_words))
+            except (InvalidOperation, ValueError):
+                continue
+            if candidate > 0:
+                quantity, unit, unit_word = candidate, candidate_unit, word
+                quantity_left = min(value.left for value in sample_words)
+                quantity_right = max(value.right for value in sample_words)
+                break
+        if quantity is not None:
+            break
+    if quantity is None:
+        raise ValueError("miktar")
+
+    before = [
+        word for word in words
+        if word is not anchor.ordinal and word.left > anchor.ordinal.right - 3 and word.right <= quantity_left
+    ]
+    before = sorted(before, key=lambda value: (value.center_y, value.left))
+    code = ""
+    code_word = next((word for word in before if 5 <= len(_token(word.text)) <= 14 and any(c.isdigit() for c in _token(word.text))), None)
+    if code_word:
+        candidate = _token(code_word.text)
+        # Pack sizes such as 150Gx12 are part of the name, not a code.
+        if not re.search(r"[gGxX]", candidate) or len(candidate) >= 8:
+            code = candidate
+            before.remove(code_word)
+    product = _clean_product(_visual_text(before))
+    if not product:
+        raise ValueError("ürün adı")
+
+    after = [word for word in words if word.left >= quantity_right - 2]
+    unit_tail = unit_pattern.split(unit_word.text, maxsplit=1)[-1]
+    amount_text = " ".join([unit_tail] + [word.text for word in sorted(after, key=lambda value: value.center_x)])
+    amount_text = re.sub(r"(?<=\d)([.,])\s+(?=\d)", r"\1", amount_text)
+    values = []
+    for match in re.finditer(r"\d+(?:[.,]\d+)*", amount_text):
+        try:
+            value = _decimal(match.group())
+        except InvalidOperation:
+            continue
+        values.append(value)
+    if len(values) < 2:
+        raise ValueError("tutarlar")
+    raw_price, net = values[0], values[-1]
+    vat = values[-2] if len(values) >= 3 else Decimal("0")
+    # Percentages can be fused into the amount stream. A VAT amount cannot be
+    # larger than the net row value on supported invoices.
+    if vat > net:
+        vat = Decimal("0")
+    if raw_price <= 0 or net <= 0:
+        raise ValueError("sayısal alan")
+    gross = net + vat
+    price = (gross / quantity).quantize(Decimal(".01"), rounding=ROUND_HALF_UP)
+    confidence_values = [word.confidence for word in words if word.confidence >= 0]
+    confidence = statistics.fmean(confidence_values) if confidence_values else -1
+    review = "Genel tablo düzeniyle okundu; ürün, miktar ve tutarı faturayla karşılaştırın."
+    if code and any(char.isalpha() for char in code):
+        review += " Ürün kodunda harf okundu; kodu kontrol edin."
+    return {
+        "row_number": anchor.number,
+        "line_total": f"{net:.2f}",
+        "review": review,
+        "product": product,
+        "unit": unit,
+        "price": f"{price:.2f}",
+        "code": code,
+        "quantity": _decimal_text(quantity),
+        "source_price": _decimal_text(raw_price),
+        "net": f"{net:.2f}",
+        "vat": f"{vat:.2f}",
+    }, confidence
+
+
+def _page_items_without_codes(words):
+    anchors = _row_anchors(words)
+    if not anchors:
+        return [], [], []
+    anchors.sort(key=lambda anchor: anchor.center_y)
+    gaps = [right.center_y-left.center_y for left,right in zip(anchors,anchors[1:]) if right.center_y>left.center_y]
+    typical_gap = statistics.median(gaps) if gaps else statistics.median(a.ordinal.height for a in anchors)*3
+    parsed, warnings = [], []
+    for index, anchor in enumerate(anchors):
+        top = (anchors[index-1].center_y+anchor.center_y)/2 if index else anchor.center_y-typical_gap*.55
+        bottom = (anchor.center_y+anchors[index+1].center_y)/2 if index+1<len(anchors) else anchor.center_y+typical_gap*.55
+        band = [word for word in words if top <= word.center_y < bottom]
+        try:
+            parsed.append(_item_without_code(anchor,band))
+        except (InvalidOperation, ValueError):
+            warnings.append(f"{anchor.number}. ürün satırının hücreleri eksiksiz okunamadı; fotoğrafla karşılaştırın.")
+    return parsed,[anchor.number for anchor in anchors],warnings
+
+
 def _page_items(words):
     anchors = _anchors(words)
     if not anchors:
@@ -518,6 +676,9 @@ def parse_tsv_table(tsv_text):
     warnings = []
     for page_words in pages.values():
         rows, numbers, page_warnings = _page_items(page_words)
+        generic_rows, generic_numbers, generic_warnings = _page_items_without_codes(page_words)
+        if len(generic_rows) > len(rows):
+            rows, numbers, page_warnings = generic_rows, generic_numbers, generic_warnings
         detected.update(numbers)
         warnings.extend(page_warnings)
         for item, confidence in rows:
@@ -540,12 +701,36 @@ def parse_tsv_table(tsv_text):
             item["review"] = (item["review"] + " " + extra).strip()
         items.append(item)
 
-    expected_rows = list(range(1, max(detected) + 1)) if detected else []
+    # Headers, dates and totals can look like row numbers in a noisy TSV. Only
+    # trust the coherent sequence beginning at 1, and stop after four missing
+    # numbers. This prevents a stray value such as 85 from claiming 85 items.
+    expected_rows = []
+    ignored = []
+    if 1 in detected:
+        detected_set = set(detected)
+        maximum = 0
+        missing_run = 0
+        for number in range(1, max(detected) + 1):
+            if number in detected_set:
+                maximum = number
+                missing_run = 0
+            else:
+                missing_run += 1
+                if missing_run >= 4:
+                    maximum = number - missing_run
+                    break
+        expected_rows = list(range(1, maximum + 1))
+        ignored = sorted(number for number in detected if number > maximum)
     missing = sorted(set(expected_rows) - {item["row_number"] for item in items})
     if missing:
         warnings.append(
             "Eksik fatura kalemleri: " + ", ".join(map(str, missing))
             + ". Eksik kalemlerle kaydedilmemeli."
+        )
+    if ignored:
+        warnings.append(
+            "Ürün tablosunun dışında okunan sıra numarası adayları göz ardı edildi: "
+            + ", ".join(map(str, ignored)) + "."
         )
     if not detected:
         warnings.append("TSV içinde ürün sıra numarası ve ürün kodu birlikte bulunamadı.")

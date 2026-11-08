@@ -290,6 +290,56 @@ def photos_hash(photos):
     return digest.hexdigest()
 
 
+def ocr_photo_variants(photos):
+    """Crop narrow paper and add rotations for sideways phone photos."""
+    try:
+        from PIL import Image, ImageOps
+    except ImportError:
+        return photos
+    primary=[]
+    rotated=[]
+    for value in photos:
+        try:
+            raw=base64.b64decode(value.split(',',1)[1],validate=True)
+            with Image.open(io.BytesIO(raw)) as opened:
+                source=ImageOps.exif_transpose(opened).convert('RGB')
+            orientations=[source]
+            if source.width>source.height*1.12:
+                orientations.extend([source.rotate(90,expand=True,fillcolor='white'),source.rotate(270,expand=True,fillcolor='white')])
+            for orientation_index,image in enumerate(orientations):
+                scan_width=min(240,image.width)
+                scan_height=max(1,round(image.height*scan_width/image.width))
+                scan=image.resize((scan_width,scan_height),Image.Resampling.BILINEAR).convert('L')
+                pixels=scan.load()
+                columns=[]
+                for x in range(scan_width):
+                    columns.append(sum(pixels[x,y]>=180 for y in range(scan_height))/scan_height>=.22)
+                runs=[];start=None;last=None;gap=max(2,round(scan_width*.015))
+                for x in range(scan_width+1):
+                    if x<scan_width and columns[x]:
+                        if start is None:start=x
+                        last=x
+                    if start is not None and (x==scan_width or x-last>gap):
+                        runs.append((start,last+1));start=last=None
+                if runs:
+                    left,right=max(runs,key=lambda pair:pair[1]-pair[0])
+                    if right-left>=scan_width*.20:
+                        margin=max(2,round(scan_width*.015));left=max(0,left-margin);right=min(scan_width,right+margin)
+                        if left>scan_width*.03 or right<scan_width*.97:
+                            scale=image.width/scan_width
+                            image=image.crop((round(left*scale),0,round(right*scale),image.height))
+                image.thumbnail((2400,5200),Image.Resampling.LANCZOS)
+                output=io.BytesIO();image.save(output,'JPEG',quality=86,optimize=True)
+                encoded='data:image/jpeg;base64,'+base64.b64encode(output.getvalue()).decode('ascii')
+                target=primary if orientation_index==0 else rotated
+                if encoded not in primary and encoded not in rotated:target.append(encoded)
+        except (OSError,ValueError):
+            if value not in primary:primary.append(value)
+    # Never sacrifice a user-selected page to make room for a rotated copy.
+    # Rotations are supplemental and use only the remaining OCR budget.
+    return (primary+rotated[:max(0,6-len(primary))]) or photos
+
+
 def tsv_reading(tsv_text):
     """Adapt coordinate-based OCR rows to the normal invoice reading shape."""
     table = parse_tsv_table(tsv_text)
@@ -878,6 +928,7 @@ class Handler(BaseHTTPRequestHandler):
                 photos = [photo(p) for p in photos]
                 if not all(photos):
                     raise ValueError('Fotoğraf verisi geçersiz.')
+                photos = ocr_photo_variants(photos)
                 executable, lang = ocr_engine()
                 with connect() as db:
                     firms = [dict(r) for r in db.execute('''SELECT id,name FROM firms
@@ -902,6 +953,18 @@ class Handler(BaseHTTPRequestHandler):
                         plain = parse_invoice(page_text, firms)
                         if page_tsv:
                             positioned = tsv_reading(page_tsv)
+                            # When the plain OCR already accounts for every row
+                            # and reconciles exactly to the printed total, keep
+                            # that complete reading. A partial coordinate pass
+                            # must not replace one correct row and then make the
+                            # otherwise complete invoice look incomplete.
+                            plain_complete = bool(
+                                plain.get('total')
+                                and plain.get('items')
+                                and not check_items(
+                                    plain['items'], plain['total'], plain.get('import_check', {})
+                                )['errors']
+                            )
                             if supplemental:
                                 conflicting = []
                                 kept = []
@@ -918,14 +981,15 @@ class Handler(BaseHTTPRequestHandler):
                                         'Ek OCR düzeninde farklı okunan satırlar ilk güvenilir okumayı değiştirmedi: '
                                         + ', '.join(map(str,sorted(set(conflicting)))) + '.'
                                     )
-                            positioned_rows = {item['row_number'] for item in positioned['items']}
+                            positioned_rows = set() if plain_complete else {item['row_number'] for item in positioned['items']}
                             # Keep plain-text rows only when the coordinate reading
                             # did not already reconstruct that invoice row.
                             plain['items'] = [
                                 item for item in plain['items']
                                 if item['row_number'] not in positioned_rows
                             ]
-                            readings.append(positioned)
+                            if not plain_complete:
+                                readings.append(positioned)
                         if supplemental:
                             plain['items'] = [
                                 item for item in plain['items']

@@ -174,6 +174,18 @@ class InvoiceTsvTests(unittest.TestCase):
         self.assertTrue(any("çelişkili" in warning for warning in result["warnings"]))
         self.assertTrue(any("Eksik fatura kalemleri: 1" in warning for warning in result["warnings"]))
 
+    def test_stray_large_number_does_not_inflate_expected_item_count(self):
+        data = TsvBuilder()
+        data.item(1, "1111111", "URUN BIR", 10, "10,0000", "1,00", "100,00", 100)
+        data.item(2, "2222222", "URUN IKI", 5, "20,0000", "1,00", "100,00", 150)
+        data.add("85", 50, 500, 20)
+        data.add("9999999", 86, 500, 65)
+
+        result = parse_tsv_table(data.text())
+
+        self.assertEqual(result["expected_rows"], [1, 2])
+        self.assertTrue(any("85" in warning and "göz ardı" in warning for warning in result["warnings"]))
+
 
 if __name__ == "__main__":
     unittest.main()
