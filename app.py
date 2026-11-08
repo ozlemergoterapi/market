@@ -11,6 +11,7 @@ import statistics
 import subprocess
 import sys
 import tempfile
+from contextlib import closing
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -108,7 +109,9 @@ def automatic_backup(now=None, keep=30):
         return target
     temporary = target.with_suffix('.tmp')
     try:
-        with sqlite3.connect(DB) as source, sqlite3.connect(temporary) as destination:
+        # sqlite3's context manager commits but does not close the connection.
+        # Explicit closing is required before Windows can rename the backup.
+        with closing(sqlite3.connect(DB)) as source, closing(sqlite3.connect(temporary)) as destination:
             if source.execute('PRAGMA quick_check').fetchone()[0] != 'ok':
                 raise sqlite3.DatabaseError('Veritabanı bütünlük kontrolünden geçemedi.')
             source.backup(destination)
@@ -140,7 +143,7 @@ def restore_backup(name):
     source_path = backup_directory() / name
     if not source_path.is_file():
         raise ValueError('Yedek dosyası bulunamadı.')
-    with sqlite3.connect(source_path) as source:
+    with closing(sqlite3.connect(source_path)) as source:
         if source.execute('PRAGMA quick_check').fetchone()[0] != 'ok':
             raise ValueError('Seçilen yedek bütünlük kontrolünden geçemedi.')
         tables = {row[0] for row in source.execute("SELECT name FROM sqlite_master WHERE type='table'")}
@@ -148,7 +151,7 @@ def restore_backup(name):
             raise ValueError('Seçilen dosya Sancaklı Market yedeği değil.')
     temporary = DB.with_suffix('.restore.tmp')
     try:
-        with sqlite3.connect(source_path) as source, sqlite3.connect(temporary) as destination:
+        with closing(sqlite3.connect(source_path)) as source, closing(sqlite3.connect(temporary)) as destination:
             source.backup(destination)
         automatic_backup()
         os.replace(temporary, DB)
