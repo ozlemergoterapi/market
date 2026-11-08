@@ -5,6 +5,9 @@ import os
 from pathlib import Path
 import sys
 import threading
+import time
+import traceback
+from urllib.request import urlopen
 import webbrowser
 
 
@@ -61,8 +64,16 @@ def main():
         backup_message = 'Yedek oluşturulamadı: ' + str(error)
 
     app.init()
+    error_log = storage / 'startup-error.log'
+
+    class LoggedHTTPServer(app.ThreadingHTTPServer):
+        def handle_error(self, request, client_address):
+            with error_log.open('a', encoding='utf-8') as log:
+                log.write('\nYerel sunucu isteği işlenemedi:\n')
+                traceback.print_exc(file=log)
+
     try:
-        server = app.ThreadingHTTPServer(('127.0.0.1', 0), app.Handler)
+        server = LoggedHTTPServer(('127.0.0.1', 0), app.Handler)
     except OSError as error:
         raise RuntimeError('Yerel uygulama sunucusu başlatılamadı: ' + str(error)) from error
 
@@ -88,8 +99,37 @@ def main():
           justify='center').pack(pady=(0, 12))
     Label(window, text=backup_message, wraplength=400, fg='#52645a').pack(pady=(0, 16))
 
+    opening = False
     def open_application():
-        webbrowser.open(address)
+        nonlocal opening
+        if opening:
+            return
+        opening = True
+
+        def wait_until_ready():
+            nonlocal opening
+            last_error = None
+            for _ in range(30):
+                try:
+                    with urlopen(address, timeout=2) as response:
+                        beginning = response.read(100).lower()
+                        status = response.status
+                    if status == 200 and b'<!doctype html' in beginning:
+                        webbrowser.open(address)
+                        opening = False
+                        return
+                except Exception as error:
+                    last_error = error
+                time.sleep(.2)
+            with error_log.open('a', encoding='utf-8') as log:
+                log.write('\nUygulama açılış kontrolü başarısız: ' + repr(last_error) + '\n')
+            opening = False
+            window.after(0, lambda: messagebox.showerror(
+                'Sancaklı Market',
+                'Uygulama sayfası hazırlanamadı. Hata kaydı:\n' + str(error_log),
+            ))
+
+        threading.Thread(target=wait_until_ready, name='sancakli-ready', daemon=True).start()
 
     closing = False
     def close_application():

@@ -21,7 +21,7 @@ from invoice_parser import parse_invoice, check_items, merge_readings
 from invoice_ocr import parse_tsv_table
 from product_matching import compare_items, identity as product_identity
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(getattr(sys, '_MEIPASS', Path(__file__).resolve().parent))
 DB = Path(os.environ.get('MARKET_DB', str(ROOT / 'data/market.sqlite3')))
 
 

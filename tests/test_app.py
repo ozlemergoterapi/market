@@ -6,7 +6,7 @@ from datetime import date, datetime
 from pathlib import Path
 from unittest.mock import patch
 import app
-from desktop_launcher import add_ocr_paths, storage_directory
+from desktop_launcher import add_ocr_paths, resource_path, storage_directory
 
 
 class LedgerTests(unittest.TestCase):
@@ -332,6 +332,11 @@ class LedgerTests(unittest.TestCase):
             storage_directory('win32', Path('C:/Users/Sancakli'), 'D:/LocalData'),
             Path('D:/LocalData') / 'Sancakli Market',
         )
+
+    def test_desktop_resources_use_pyinstaller_bundle_directory(self):
+        bundle = Path(self.tmp.name) / 'bundle'
+        with patch.object(sys, '_MEIPASS', str(bundle), create=True):
+            self.assertEqual(resource_path('static/index.html'), bundle/'static/index.html')
 
     def test_windows_launcher_uses_installed_turkish_ocr_data(self):
         with tempfile.TemporaryDirectory() as directory:
