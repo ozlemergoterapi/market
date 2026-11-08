@@ -54,8 +54,17 @@ function Require-Winget {
 function Install-WingetPackage([string]$Id, [switch]$UserScope) {
     $arguments = @('install', '--id', $Id, '--exact', '--source', 'winget', '--accept-package-agreements', '--accept-source-agreements', '--silent', '--disable-interactivity')
     if ($UserScope) { $arguments += @('--scope', 'user') }
-    & winget @arguments
-    if ($LASTEXITCODE -ne 0) { throw "$Id otomatik kurulamadı. Windows kurulum kodu: $LASTEXITCODE" }
+    $exitCode = 1
+    foreach ($attempt in 1..3) {
+        & winget @arguments
+        $exitCode = $LASTEXITCODE
+        if ($exitCode -eq 0) { return }
+        if ($attempt -lt 3) {
+            Write-Host "$Id indirilemedi; sunucu için yeniden deneniyor ($attempt/3)..." -ForegroundColor Yellow
+            Start-Sleep -Seconds 8
+        }
+    }
+    throw "$Id otomatik kurulamadı. Windows kurulum kodu: $exitCode"
 }
 
 function Download-Verified([string]$Url, [string]$Destination, [string]$Sha256) {
