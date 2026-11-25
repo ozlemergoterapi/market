@@ -1,6 +1,7 @@
 """Offline Turkish invoice text parser. Produces reviewable drafts, never saves."""
 import re
 import unicodedata
+from uuid import UUID
 from difflib import SequenceMatcher
 from datetime import date
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
@@ -23,6 +24,10 @@ def decimal_value(text):
         head, tail = text.rsplit('.',1)
         text = head.replace('.','') + '.' + tail
     return Decimal(text)
+
+
+def paid_unit_price(gross, quantity):
+    return (gross / quantity).quantize(Decimal('.0001'), rounding=ROUND_HALF_UP)
 
 
 def parse_date(text):
@@ -111,11 +116,109 @@ def invoice_number(text):
     return ''
 
 
+ETTN_LABEL = re.compile(r'\b(?:ettn|evrensel\s+tekil\s+tanimlama\s+numarasi)\b\s*[:.=-]?\s*')
+ETTN_VALUE = re.compile(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{32}')
+ETTN_OCR_VALUE = re.compile(
+    r'(?:[0-9a-f]{8}(?:\s*[-–—]\s*[0-9a-f]{4}){3}\s*[-–—]\s*[0-9a-f]{12}|[0-9a-f]{32})(?![\w-])'
+)
+
+
+def normalize_ettn(value):
+    if not isinstance(value, str):
+        raise ValueError('ETTN geçersiz. Faturadaki numarayı kontrol edin.')
+    value = re.sub(r'\s+', '', value.lower()).translate(str.maketrans('–—', '--'))
+    if not value:
+        return ''
+    if not ETTN_VALUE.fullmatch(value):
+        raise ValueError('ETTN geçersiz. Faturadaki numarayı kontrol edin.')
+    return str(UUID(value))
+
+
+def read_ettn_candidates(lines):
+    candidates = set()
+    for index, line in enumerate(lines):
+        match = ETTN_LABEL.search(normalized(line))
+        if not match:
+            continue
+        parts = [normalized(line)[match.end():]]
+        for following in lines[index+1:index+3]:
+            if not re.fullmatch(r'[0-9a-fA-F\s–—-]+', following):
+                break
+            parts.append(following.lower())
+        for length in range(1, len(parts)+1):
+            text = ' '.join(parts[:length]).strip()
+            value = ETTN_OCR_VALUE.match(text)
+            if value:
+                candidates.add(normalize_ettn(value[0]))
+                break
+    return sorted(candidates)
+
+
+def seller_tax_numbers(lines):
+    """Look for VKN in identified seller sections, ignoring customer entries."""
+    seller = re.compile(r'\b(?:satici(?:nin)?|tedarikci(?:nin)?|duzenleyen|gonderen)\b')
+    buyer = re.compile(r'\b(?:sayin|alici(?:nin)?|musteri(?:nin)?)\b')
+    label = re.compile(r'\b(?:v\.?\s*k\.?\s*n\.?|vergi\s*(?:kimlik\s*)?(?:numarasi|no\.?))\b[\s:.#-]*')
+    header = [normalized(line) for line in lines[:80]]
+    buyer_index = next((i for i, line in enumerate(header) if buyer.match(line)), None)
+    role = None
+    numbers = set()
+    for index, line in enumerate(header):
+        if re.match(r'^(?:sira no|odenecek tutar)', line):
+            break
+        field = label.search(line)
+        leading = line[:field.start()] if field else line
+        if buyer.match(line) or (field and buyer.search(leading)):
+            role = 'buyer'
+        elif seller.match(line):
+            role = 'seller'
+        if not field or (role != 'seller' and not (role is None and buyer_index is not None and index < buyer_index)):
+            continue
+        value = line[field.end():].strip() or (header[index+1] if index+1 < len(header) else '')
+        match = re.match(r'([0-9](?:[ -]?[0-9]){9})(?![0-9]|[ -]+[0-9])', value)
+        if match:
+            numbers.add(re.sub(r'[^0-9]', '', match[1]))
+    return sorted(numbers)
+
+
+def seller_name_hint(lines):
+    role = None
+    hint = ''
+    for line in lines[:40]:
+        label = normalized(line)
+        if re.match(r'^(?:sayin|alici(?:nin)?|musteri(?:nin)?)\b', label):
+            role = 'buyer'
+            continue
+        seller = re.match(r'^(?:satici|tedarikci|duzenleyen|gonderen)(?:\s*[:.-]\s*|\s+|$)', label)
+        if seller:
+            role = 'seller'
+            label = label[seller.end():]
+            line = line[seller.end():].strip()
+        buyer = re.search(r'\b(?:alici(?:nin)?|musteri(?:nin)?)\s*:', label)
+        if buyer:
+            line = line[:buyer.start()].strip()
+            label = label[:buyer.start()]
+        if role != 'buyer' and re.search(r'\b(?:gida|pazarlama|mesrubat|ticaret|ltd|sanayi)\b', label):
+            if role == 'seller':
+                return line[:200]
+            if not hint:
+                hint = line[:200]
+        if buyer:
+            role = 'buyer'
+    return hint
+
+
 def parse_invoice(text, firms=()):
     lines = [re.sub(r'[|\t]+', ' ', line).strip() for line in text.splitlines() if line.strip()]
     lines = [re.sub(r'^(\d{1,3})\s*[:.)]\s*(?=\d{5,14}\b)',r'\1 ',line) for line in lines]
     lines = [re.sub(r'(?<=\d)([.,])\s+(?=\d)',r'\1',line) for line in lines]
-    result = dict(number='', issued='', total='', supplier='', firm_id=None, items=[], warnings=[], sources={})
+    ettn_candidates = read_ettn_candidates(lines)
+    result = dict(number='', issued='', total='', supplier='', firm_id=None, items=[], warnings=[], sources={},
+                  ettn=ettn_candidates[0] if len(ettn_candidates)==1 else '', ettn_candidates=ettn_candidates)
+    result['seller_name_hint'] = seller_name_hint(lines)
+    result['supplier'] = result['seller_name_hint']
+    if result['ettn']:
+        result['sources']['ettn'] = result['ettn']
     candidates = dict(number=[],issued=[],total=[])
     for index, line in enumerate(lines):
         label = normalized(line)
@@ -155,8 +258,6 @@ def parse_invoice(text, firms=()):
                 if value:
                     candidates[kind].append((value,' '.join(window[:offset+1])))
                     break
-        if not result['supplier'] and re.search(r'gida|pazarlama|mesrubat|ticaret|ltd|sanayi', label) and index < 40:
-            result['supplier'] = line[:200]
     for key,values in candidates.items():
         unique={value for value,_ in values}
         if len(unique)==1:
@@ -183,7 +284,13 @@ def parse_invoice(text, firms=()):
         words=[w for w in re.findall(r'[a-z0-9]+',normalized(firm['name'])) if len(w)>3 and w not in generic]
         if words and any(word in supplier_words for word in words):
             matches.add(firm['id'])
-    if len(matches)==1:
+    vkn = seller_tax_numbers(lines)
+    result['supplier_tax_numbers'] = vkn
+    if vkn:
+        tax_matches = {firm['id'] for firm in firms if len(vkn)==1 and firm.get('tax_number')==vkn[0]}
+        if len(tax_matches)==1:
+            result['firm_id'] = next(iter(tax_matches))
+    elif len(matches)==1:
         result['firm_id']=next(iter(matches))
     else:
         result['warnings'].append('Firma eşleştirilemedi veya birden fazla eşleşme var. Seçili firmayı kontrol edin.')
@@ -209,7 +316,7 @@ def parse_invoice(text, firms=()):
             qty=Decimal(str(quantity));raw=Decimal(str(raw_price));net_value=Decimal(str(net));vat_value=Decimal(str(vat))
             if qty<=0 or raw<=0 or net_value<=0 or vat_value<0:
                 raise ValueError()
-            price=((net_value+vat_value)/qty).quantize(Decimal('.01'),rounding=ROUND_HALF_UP)
+            price=paid_unit_price(net_value+vat_value, qty)
             parsed_items.append(dict(row_number=int(row_number),line_total=str(net_value),review=review,product=product.strip()[:500],unit=normalized(unit),price=str(price),code=code,
                                      quantity=str(qty),source_price=str(raw),net=str(net_value),vat=str(vat_value)))
         except (InvalidOperation,ValueError):
@@ -314,7 +421,7 @@ def parse_invoice(text, firms=()):
             raw_price = decimal_value(amounts[0])
             if vat < 0 or net <= 0 or raw_price <= 0:
                 raise ValueError()
-            price = ((net + vat) / qty).quantize(Decimal('.01'), rounding=ROUND_HALF_UP)
+            price = paid_unit_price(net + vat, qty)
             review = ''
             if net > qty*raw_price+Decimal('.10') or net < qty*raw_price*Decimal('.5'):
                 review = 'Miktar ile satır/birim fiyatı arasında büyük fark var. Adet, koli ve iskonto bilgilerini kontrol edin.'
@@ -335,7 +442,7 @@ def parse_invoice(text, firms=()):
             remaining=difference
             for index,item in enumerate(result['items']):
                 vat=remaining if index+1==len(result['items']) else (difference*Decimal(item['net'])/net_sum).quantize(Decimal('.01'),rounding=ROUND_HALF_UP)
-                remaining-=vat;item['vat']=str(vat);item['price']=str(((Decimal(item['net'])+vat)/Decimal(item['quantity'])).quantize(Decimal('.01'),rounding=ROUND_HALF_UP))
+                remaining-=vat;item['vat']=str(vat);item['price']=str(paid_unit_price(Decimal(item['net'])+vat, Decimal(item['quantity'])))
     result['warnings'].extend('Ürün kodu '+item['code']+': '+item['review'] for item in result['items'] if item.get('review'))
     # A row starts with a sequence number followed by a numeric product code.
     # Product descriptions can also begin with values such as "120 GX20KL";
@@ -381,9 +488,16 @@ def check_items(items, total, metadata):
             number=int(item.get('row_number') or 0)
             quantity=Decimal(str(item.get('quantity') or '0'))
             price=Decimal(str(item.get('price') or '0'))
-            amount=Decimal(str(item.get('line_total') or 'NaN'))
+            amount=Decimal(str(item.get('line_total', 'NaN')))
             vat=Decimal(str(item.get('vat') or '0')) if net_lines else Decimal('0')
             gross_amount=amount+vat if net_lines else amount
+            if item.get('gift_only') is True:
+                gift=Decimal(str(item.get('gift_quantity') or '0'))
+                if not gift.is_finite() or gift<=0 or any(value!=0 for value in (quantity,price,amount,vat)):
+                    errors.append(f'{number}. bedelsiz satırın miktarını ve sıfır tutarını kontrol edin.')
+                else:
+                    numbers.append(number)
+                continue
             if not all(v.is_finite() for v in (quantity,price,amount,vat,gross_amount)) or quantity<=0 or price<=0 or amount<=0 or vat<0 or gross_amount>999999999:
                 raise ValueError()
             if abs(quantity*price-gross_amount)>quantity*Decimal('.005')+Decimal('.02'):
@@ -411,6 +525,13 @@ def check_items(items, total, metadata):
 def merge_readings(readings):
     """Merge complementary OCR layouts, rejecting rows whose evidence conflicts."""
     result=dict(number='',issued='',total='',supplier='',firm_id=None,items=[],warnings=[],sources={})
+    ettn_candidates = sorted({value for r in readings for value in r.get('ettn_candidates', [])})
+    result['ettn_candidates'] = ettn_candidates
+    result['ettn'] = ettn_candidates[0] if len(ettn_candidates)==1 else ''
+    if result['ettn']:
+        result['sources']['ettn'] = result['ettn']
+    elif ettn_candidates:
+        result['warnings'].append('Birden fazla ETTN okundu. Faturadaki numarayı kontrol edin.')
     for key,label in [('number','Fatura numarası'),('issued','Fatura tarihi'),('total','Fatura toplamı')]:
         values={r[key] for r in readings if r.get(key)}
         if len(values)==1:
@@ -420,12 +541,19 @@ def merge_readings(readings):
             result['warnings'].append(label+' farklı okumalarda çelişkili çıktı; fotoğrafla kontrol edin.')
         else:
             result['warnings'].append(label+' okunamadı; elle girin.')
-    firms={r['firm_id'] for r in readings if r.get('firm_id')}
-    if len(firms)==1:
+    vkn = sorted({value for r in readings for value in r.get('supplier_tax_numbers', [])})
+    result['supplier_tax_numbers'] = vkn
+    firms={r['firm_id'] for r in readings if r.get('firm_id') and (not vkn or r.get('supplier_tax_numbers') == vkn)}
+    if len(vkn)<=1 and len(firms)==1:
         result['firm_id']=next(iter(firms))
+        if vkn:
+            result['warnings'].append('Firma satıcının vergi numarasından eşleştirildi.')
+    elif vkn:
+        result['warnings'].append('Satıcının vergi numarası tek bir firmayla eşleşmedi. Firmayı kontrol edin.')
     else:
         result['warnings'].append('Firma eşleşmesini kontrol edin.')
     result['supplier']=next((r['supplier'] for r in readings if r.get('firm_id')==result['firm_id'] and r.get('supplier')),next((r['supplier'] for r in readings if r.get('supplier')),''))
+    result['seller_name_hint'] = next((r['seller_name_hint'] for r in readings if r.get('seller_name_hint')), '')
     detected=sorted({n for r in readings for n in r.get('import_check',{}).get('detected_rows',[]) if isinstance(n,int) and 1<=n<=500})
     expected_fallback=sorted({n for r in readings for n in r.get('import_check',{}).get('expected_rows',[]) if isinstance(n,int) and 1<=n<=500})
     ignored=[]

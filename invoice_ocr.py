@@ -17,7 +17,9 @@ import re
 import statistics
 import unicodedata
 from dataclasses import dataclass
-from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+from decimal import Decimal, InvalidOperation
+
+from invoice_parser import paid_unit_price
 
 
 TSV_FIELDS = (
@@ -352,7 +354,7 @@ def _item_from_band(anchor, words, table_left, table_right):
     # column used to be mistaken for the unit price here.
     if quantity * raw_price < gross * Decimal(".5"):
         raise ValueError("birim fiyat sütunu")
-    price = (gross / quantity).quantize(Decimal(".01"), rounding=ROUND_HALF_UP)
+    price = paid_unit_price(gross, quantity)
     review = ""
     if any(char.isalpha() for char in anchor.code):
         review = (
@@ -391,7 +393,7 @@ def _item_from_band(anchor, words, table_left, table_right):
         "review": review,
         "product": _clean_product(product_text),
         "unit": unit,
-        "price": f"{price:.2f}",
+        "price": str(price),
         "code": anchor.code,
         "quantity": _decimal_text(quantity),
         "source_price": _decimal_text(raw_price),
@@ -401,7 +403,7 @@ def _item_from_band(anchor, words, table_left, table_right):
     return item, confidence
 
 
-def _item_from_geometry(anchor, words):
+def _item_from_geometry(anchor, words, amount_order=None):
     """Extract a row without assuming one supplier's fixed column widths.
 
     The product code anchors the left side.  The first explicit quantity unit
@@ -466,6 +468,8 @@ def _item_from_geometry(anchor, words):
     unit_tail = unit_pattern.split(ordered[unit_index].text, maxsplit=1)[-1]
     amount_text = " ".join([unit_tail] + [word.text for word in amount_words])
     amount_text = re.sub(r"(?<=\d)([.,])\s+(?=\d)", r"\1", amount_text)
+    if amount_order:
+        amount_text = _without_percentages(amount_text)
     monetary = []
     for match in re.finditer(r"(?<!\d)\d+(?:[.,]\d+)+(?!\d)", amount_text):
         try:
@@ -475,11 +479,13 @@ def _item_from_geometry(anchor, words):
     if len(monetary) < 3:
         raise ValueError("tutarlar")
     raw_price, vat, net = monetary[0], monetary[-2], monetary[-1]
-    if raw_price <= 0 or vat < 0 or net <= 0:
+    if amount_order == 'net_vat':
+        vat, net = net, vat
+    if raw_price <= 0 or vat < 0 or net <= 0 or (amount_order and vat > net):
         raise ValueError("sayısal alan")
 
     gross = net + vat
-    price = (gross / quantity).quantize(Decimal(".01"), rounding=ROUND_HALF_UP)
+    price = paid_unit_price(gross, quantity)
     review = "Farklı fatura sütun düzeniyle okundu; ürün, miktar ve tutarı faturayla karşılaştırın."
     if any(char.isalpha() for char in anchor.code):
         review += " Ürün kodunda harf okundu; kod otomatik değiştirilmedi."
@@ -491,7 +497,7 @@ def _item_from_geometry(anchor, words):
         "review": review,
         "product": _clean_product(product_text),
         "unit": unit,
-        "price": f"{price:.2f}",
+        "price": str(price),
         "code": anchor.code,
         "quantity": _decimal_text(quantity),
         "source_price": _decimal_text(raw_price),
@@ -500,7 +506,11 @@ def _item_from_geometry(anchor, words):
     }, confidence
 
 
-def _item_without_code(anchor, words):
+def _without_percentages(text):
+    return re.sub(r"%\s*\d+(?:[.,]\d+)*|\d+(?:[.,]\d+)*%(?!\d)", " ", text)
+
+
+def _item_without_code(anchor, words, amount_order=None):
     """Extract a visually aligned row whose supplier table has no code column."""
     ordered = sorted(words, key=lambda word: (word.center_x, word.top))
     unit_pattern = re.compile(r"(?:Adet|Ad\.?|Kg|Koli|KL|Lt|Litre|Paket|Kutu)", re.IGNORECASE)
@@ -547,6 +557,8 @@ def _item_without_code(anchor, words):
     unit_tail = unit_pattern.split(unit_word.text, maxsplit=1)[-1]
     amount_text = " ".join([unit_tail] + [word.text for word in sorted(after, key=lambda value: value.center_x)])
     amount_text = re.sub(r"(?<=\d)([.,])\s+(?=\d)", r"\1", amount_text)
+    if amount_order:
+        amount_text = _without_percentages(amount_text)
     values = []
     for match in re.finditer(r"\d+(?:[.,]\d+)*", amount_text):
         try:
@@ -554,18 +566,22 @@ def _item_without_code(anchor, words):
         except InvalidOperation:
             continue
         values.append(value)
-    if len(values) < 2:
+    if len(values) < (3 if amount_order else 2):
         raise ValueError("tutarlar")
     raw_price, net = values[0], values[-1]
     vat = values[-2] if len(values) >= 3 else Decimal("0")
+    if amount_order == 'net_vat':
+        vat, net = net, vat
     # Percentages can be fused into the amount stream. A VAT amount cannot be
     # larger than the net row value on supported invoices.
     if vat > net:
+        if amount_order:
+            raise ValueError("KDV tutarı")
         vat = Decimal("0")
     if raw_price <= 0 or net <= 0:
         raise ValueError("sayısal alan")
     gross = net + vat
-    price = (gross / quantity).quantize(Decimal(".01"), rounding=ROUND_HALF_UP)
+    price = paid_unit_price(gross, quantity)
     confidence_values = [word.confidence for word in words if word.confidence >= 0]
     confidence = statistics.fmean(confidence_values) if confidence_values else -1
     review = "Genel tablo düzeniyle okundu; ürün, miktar ve tutarı faturayla karşılaştırın."
@@ -577,7 +593,7 @@ def _item_without_code(anchor, words):
         "review": review,
         "product": product,
         "unit": unit,
-        "price": f"{price:.2f}",
+        "price": str(price),
         "code": code,
         "quantity": _decimal_text(quantity),
         "source_price": _decimal_text(raw_price),
@@ -586,7 +602,7 @@ def _item_without_code(anchor, words):
     }, confidence
 
 
-def _page_items_without_codes(words):
+def _page_items_without_codes(words, amount_order=None):
     anchors = _row_anchors(words)
     if not anchors:
         return [], [], []
@@ -599,13 +615,13 @@ def _page_items_without_codes(words):
         bottom = (anchor.center_y+anchors[index+1].center_y)/2 if index+1<len(anchors) else anchor.center_y+typical_gap*.55
         band = [word for word in words if top <= word.center_y < bottom]
         try:
-            parsed.append(_item_without_code(anchor,band))
+            parsed.append(_item_without_code(anchor,band,amount_order))
         except (InvalidOperation, ValueError):
             warnings.append(f"{anchor.number}. ürün satırının hücreleri eksiksiz okunamadı; fotoğrafla karşılaştırın.")
     return parsed,[anchor.number for anchor in anchors],warnings
 
 
-def _page_items(words):
+def _page_items(words, amount_order=None):
     anchors = _anchors(words)
     if not anchors:
         return [], [], []
@@ -646,10 +662,15 @@ def _page_items(words):
         )
         band = [word for word in words if top <= word.center_y < bottom]
         try:
-            item, confidence = _item_from_band(anchor, band, table_left, table_right)
+            if amount_order:
+                item, confidence = _item_from_geometry(anchor, band, amount_order)
+            else:
+                item, confidence = _item_from_band(anchor, band, table_left, table_right)
             parsed.append((item, confidence))
         except (InvalidOperation, ValueError):
             try:
+                if amount_order:
+                    raise ValueError("tedarikçi düzeni")
                 item, confidence = _item_from_geometry(anchor, band)
                 parsed.append((item, confidence))
             except (InvalidOperation, ValueError):
@@ -659,7 +680,7 @@ def _page_items(words):
     return parsed, [anchor.number for anchor in anchors], warnings
 
 
-def parse_tsv_table(tsv_text):
+def parse_tsv_table(tsv_text, amount_order=None):
     """Return parse_invoice-compatible items reconstructed from TSV words.
 
     The return value contains ``items``, ``expected_rows`` and ``warnings``.
@@ -675,8 +696,8 @@ def parse_tsv_table(tsv_text):
     detected = set()
     warnings = []
     for page_words in pages.values():
-        rows, numbers, page_warnings = _page_items(page_words)
-        generic_rows, generic_numbers, generic_warnings = _page_items_without_codes(page_words)
+        rows, numbers, page_warnings = _page_items(page_words, amount_order)
+        generic_rows, generic_numbers, generic_warnings = _page_items_without_codes(page_words, amount_order)
         if len(generic_rows) > len(rows):
             rows, numbers, page_warnings = generic_rows, generic_numbers, generic_warnings
         detected.update(numbers)

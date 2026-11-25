@@ -22,6 +22,202 @@ class LedgerTests(unittest.TestCase):
         app.DB = self.original
         self.tmp.cleanup()
 
+    def test_deleted_invoice_draft_cannot_attach_to_reused_id(self):
+        document = dict(firm_id=1, number='OLD', issued='2026-01-01', days=10, total='100')
+        first = app.create_invoice(document)
+        original_identity = app.state()['invoices'][0]['identity']
+        key = 'invoice:uid:' + original_identity
+        payload = {'fields':[{'name':'number','value':'OLD-EDIT'}]}
+        app.save_draft(key, payload)
+        app.delete_record('invoice', first, {'invoices':1})
+        second = app.create_invoice(dict(document, number='NEW', total='200'))
+        self.assertEqual(second, first)
+        self.assertIsNone(app.load_draft(key))
+        with self.assertRaisesRegex(ValueError, 'artık kayıtlı değil'):
+            app.save_draft(key, payload)
+        with self.assertRaisesRegex(ValueError, 'artık kayıtlı değil'):
+            app.save_draft(f'invoice:{second}', payload)
+        with self.assertRaisesRegex(ValueError, 'aynı kayıt değil'):
+            app.create_invoice(dict(document, invoice_identity=original_identity), record_id=second)
+        with app.connect() as db:
+            db.execute("INSERT INTO form_drafts VALUES(?, '{}', '2026-01-01')", (f'invoice:{second}',))
+        app.init()
+        self.assertIsNone(app.load_draft(f'invoice:{second}'))
+        self.assertEqual(app.state()['invoices'][0]['number'], 'NEW')
+
+    def test_restore_rejects_invalid_schema_without_replacing_active_database(self):
+        folder = app.backup_directory()
+        folder.mkdir()
+        source = folder/'market-2026-01-03_00-00-00-000000.sqlite3'
+        with app.sqlite3.connect(source) as db:
+            for table in ('firms','invoices','items','payments'):
+                db.execute(f'CREATE TABLE {table}(id INTEGER PRIMARY KEY)')
+            self.assertEqual(db.execute('PRAGMA quick_check').fetchone()[0], 'ok')
+        original = app.DB.read_bytes()
+        with self.assertRaisesRegex(ValueError, 'Seçilen yedek açılamadı'):
+            app.restore_backup(source.name)
+        self.assertEqual(app.DB.read_bytes(), original)
+        self.assertEqual(app.state()['firms'][0]['name'], 'Güneş Gıda')
+
+    def test_ettn_is_unique_across_firms_and_cannot_be_overridden(self):
+        with app.connect() as db:
+            db.execute("INSERT INTO firms(name) VALUES('Yıldız Gıda')")
+        document = dict(firm_id=1, number='G-1', issued='2026-01-01', days=30, total='100')
+        ettn = '13a2cb00-381d-4bf7-8aa0-123456789abc'
+        app.create_invoice(dict(document, ettn=ettn.upper()))
+        app.create_invoice(dict(document, days=45), record_id=1)
+        self.assertEqual(app.state()['invoices'][0]['ettn'], ettn)
+        another = dict(document, firm_id=2, number='Y-1', ettn=ettn.replace('-', ''), duplicate_confirmed=True)
+        with self.assertRaisesRegex(ValueError, 'G-1 numaralı faturada'):
+            app.create_invoice(another)
+        undo = app.delete_record('invoice', 1, {'invoices':1})
+        app.create_invoice(another)
+        with self.assertRaisesRegex(ValueError, 'ETTN başka bir faturada'):
+            app.restore_deleted_record(undo)
+
+    def test_firm_merge_moves_records_and_takes_premerge_backup(self):
+        with app.connect() as db:
+            db.execute("INSERT INTO firms(name,default_due_days) VALUES('Güneş Gıda Ltd.',30)")
+            db.execute("UPDATE firms SET phone='+90 555 123 45 67' WHERE id=1")
+        app.create_invoice(dict(firm_id=1, number='G-1', issued='2025-01-01', days=30, total='100',
+                                ocr_supplier='Güneş Ticaret'))
+        app.create_payment(dict(invoice_id=1, amount='20', paid_on='2025-01-02'))
+        app.create_payment(dict(firm_id=1, amount='10', paid_on='2025-01-02'))
+        app.create_account_entry(dict(kind='credit', firm_id=1, invoice_id=1,
+                                      entry_date='2025-01-03', amount='5'))
+        app.save_draft('invoice:1', {'fields':[{'name':'firm_id','value':'1'}]})
+        with app.connect() as db:
+            preview = app.firm_merge_details(db, 1, 2)
+        self.assertEqual(preview['counts'], dict(invoices=1, openings=0, credits=1, payments=2))
+        self.assertEqual(preview['balance'], 6500)
+        app.merge_firms(1, 2, preview['token'])
+        ledger = app.state()
+        firm, = ledger['firms']
+        self.assertEqual((firm['id'], firm['balance'], firm['default_due_days']), (2, 6500, 30))
+        self.assertEqual(firm['phone'], '+90 555 123 45 67')
+        self.assertIn('Güneş Ticaret', firm['ocr_aliases'])
+        self.assertEqual({p['firm_id'] for p in ledger['payments']}, {2})
+        self.assertEqual(ledger['credits'][0]['firm_id'], 2)
+        self.assertEqual(app.load_draft('invoice:1')['payload']['fields'][0]['value'], '2')
+        with app.sqlite3.connect(next(app.backup_directory().glob('*.sqlite3'))) as backup:
+            self.assertEqual(backup.execute('SELECT firm_id FROM invoices').fetchone()[0], 1)
+
+    def test_firm_merge_rejects_duplicate_invoices_and_stale_confirmation(self):
+        with app.connect() as db:
+            db.execute("INSERT INTO firms(name) VALUES('Güneş Gıda Ltd.')")
+        data = dict(firm_id=1, number='G-1', issued='2025-01-01', days=30, total='100')
+        app.create_invoice(data)
+        with app.connect() as db:
+            preview = app.firm_merge_details(db, 1, 2)
+        app.create_invoice(dict(data, firm_id=2, number='G-2'))
+        with self.assertRaisesRegex(ValueError, 'Önizlemeyi'):
+            app.merge_firms(1, 2, preview['token'])
+        app.create_invoice(dict(data, firm_id=2, total='125'))
+        with app.connect() as db:
+            preview = app.firm_merge_details(db, 1, 2)
+        self.assertEqual(preview['duplicates'], ['G-1'])
+        with self.assertRaisesRegex(ValueError, 'Çakışan'):
+            app.merge_firms(1, 2, preview['token'])
+        self.assertEqual(len(app.state()['firms']), 2)
+
+    def test_monthly_purchases_use_invoice_and_return_dates(self):
+        with app.connect() as db:
+            db.execute("INSERT INTO firms(name) VALUES('Yıldız Gıda')")
+        app.create_invoice(dict(firm_id=1, number='G-1', issued='2024-12-31', days=30, total='100'))
+        app.create_invoice(dict(firm_id=1, number='G-2', issued='2025-01-31', days=30, total='125'))
+        app.create_invoice(dict(firm_id=2, number='Y-1', issued='2025-01-01', days=30, total='50'))
+        app.create_invoice(dict(firm_id=2, number='Y-2', issued='2025-02-01', days=30, total='75'))
+        app.create_payment(dict(firm_id=1, amount='20', paid_on='2025-01-02'))
+        app.create_account_entry(dict(kind='credit', firm_id=1, invoice_id=1,
+                                      entry_date='2025-01-03', amount='5'))
+        app.create_account_entry(dict(kind='opening', firm_id=1, entry_date='2025-01-04',
+                                      due='2025-02-01', amount='150'))
+        summary = app.monthly_purchases('2025-01')
+        self.assertEqual(summary['previous_month'], '2024-12')
+        self.assertEqual(summary['totals'], dict(purchases=17500, returns=500, net=17000,
+                                                previous_purchases=10000, previous_returns=0,
+                                                previous_net=10000, change=7000, change_percent=70))
+        first, second = summary['suppliers']
+        self.assertEqual((first['net'], first['change_percent']), (12000, 20))
+        self.assertIsNone(second['change_percent'])
+        self.assertEqual(app.monthly_purchases('2023-01')['suppliers'], [])
+
+    def test_range_report_uses_movement_dates_and_historical_debt(self):
+        app.create_invoice(dict(firm_id=1, number='G-1', issued='2024-12-25', days=10, total='100'))
+        app.create_invoice(dict(firm_id=1, number='G-2', issued='2025-01-10', days=30, total='60'))
+        app.create_payment(dict(invoice_id=1, amount='20', paid_on='2024-12-31'))
+        app.create_payment(dict(firm_id=1, amount='25', paid_on='2025-01-15'))
+        app.create_account_entry(dict(kind='credit', firm_id=1, invoice_id=1,
+                                      entry_date='2025-01-12', amount='5'))
+        app.create_payment(dict(firm_id=1, amount='50', paid_on='2025-02-01'))
+        with app.connect() as db:
+            report = app.range_report(db, '2025-01-01', '2025-01-31', '2024-12-01', '2024-12-31')
+        self.assertEqual((report['opening_debt'], report['closing_debt']), (8000, 11000))
+        self.assertEqual(report['current']['purchases'], 6000)
+        self.assertEqual(report['current']['returns'], 500)
+        self.assertEqual(report['current']['payments'], 2500)
+        self.assertEqual(report['previous']['payments'], 2000)
+        firm, = report['suppliers']
+        self.assertEqual((firm['overdue'], firm['due_today'], firm['future']), (5000, 0, 6000))
+        self.assertEqual(app.state()['firms'][0]['balance'], 6000)
+
+    def test_firm_payment_reduces_plan_without_changing_legacy_payments(self):
+        first = dict(firm_id=1, number='G-1', issued='2025-01-01', days=5, total='100')
+        app.create_invoice(first)
+        app.create_invoice(dict(first, number='G-2', days=15, total='70'))
+        app.create_payment(dict(invoice_id=1, amount='20', paid_on='2025-01-02'))
+        payment = dict(firm_id=1, amount='120', paid_on='2025-01-03')
+        app.create_payment(payment)
+        overview = app.state(date(2025, 1, 10))
+        self.assertEqual(overview['firms'][0]['balance'], 3000)
+        self.assertEqual([entry['remaining'] for entry in overview['obligations']], [0, 3000])
+        self.assertEqual([entry['paid'] for entry in overview['invoices']], [2000, 0])
+        self.assertEqual(overview['totals']['overdue'], 0)
+        self.assertEqual(overview['payments'][0]['target_type'], 'firm')
+        self.assertIsNone(overview['payments'][0]['invoice_id'])
+        with self.assertRaisesRegex(ValueError, 'cari borcunu aşamaz'):
+            app.create_payment(dict(payment, amount='30.01'))
+        app.create_payment(dict(payment, amount='110'), record_id=1)
+        undo_id = app.delete_payment(dict(id=1, target_type='firm'))
+        self.assertEqual(app.state()['firms'][0]['balance'], 15000)
+        app.restore_deleted_record(undo_id)
+        self.assertEqual(app.state()['firms'][0]['balance'], 4000)
+
+    def test_restore_deleted_invoice_restores_children_once(self):
+        app.create_invoice(dict(firm_id=1, number='G-1', issued='2025-01-01', days=10, total='100',
+                                items=[dict(product='Çay', unit='adet', price='1.2345')]))
+        app.create_payment(dict(invoice_id=1, amount='20', paid_on='2025-01-02'))
+        app.create_account_entry(dict(kind='credit', firm_id=1, invoice_id=1,
+                                      entry_date='2025-01-03', amount='10'))
+        undo_id = app.delete_record('invoice', 1, dict(invoices=1, payments=1, items=1, entries=1))
+        self.assertEqual(app.state()['totals']['total'], 0)
+        app.restore_deleted_record(undo_id)
+        restored = app.state()
+        self.assertEqual(restored['totals']['total'], 7000)
+        self.assertEqual(restored['items'][0]['unit_price'], '1.2345')
+        with self.assertRaisesRegex(ValueError, 'bulunamadı'):
+            app.restore_deleted_record(undo_id)
+
+    def test_restore_payment_cannot_exceed_remaining_debt(self):
+        app.create_invoice(dict(firm_id=1, number='G-1', issued='2025-01-01', days=10, total='100'))
+        app.create_payment(dict(invoice_id=1, amount='70', paid_on='2025-01-02'))
+        undo_id = app.delete_payment(dict(id=1))
+        app.create_payment(dict(invoice_id=1, amount='40', paid_on='2025-01-03'))
+        with self.assertRaisesRegex(ValueError, 'kalan borç'):
+            app.restore_deleted_record(undo_id)
+        self.assertEqual(app.state()['totals']['total'], 6000)
+
+    def test_archived_firm_keeps_existing_debt_but_rejects_new_invoice(self):
+        data = dict(firm_id=1, number='G-1', issued='2025-01-01', days=10, total='100')
+        app.create_invoice(data)
+        with app.connect() as db:
+            db.execute('UPDATE firms SET archived=1 WHERE id=1')
+        app.create_invoice(dict(data, days=15), record_id=1)
+        app.create_payment(dict(invoice_id=1, amount='40', paid_on='2025-01-02'))
+        with self.assertRaisesRegex(ValueError, 'arşivden çıkarın'):
+            app.create_invoice(dict(data, number='G-2'))
+        self.assertEqual(app.state(include_analysis=False)['totals']['total'], 6000)
+
     @patch('app.shutil.which', return_value=None)
     def test_ocr_engine_explains_missing_program(self, _which):
         with self.assertRaisesRegex(ValueError, 'kurulum|Kurulum|Mac-Uygulamasini'):
@@ -44,7 +240,7 @@ class LedgerTests(unittest.TestCase):
         data = dict(firm_id=1,number='F001',issued='2026-01-20',days=20,total='1000.50',duplicate_confirmed=True,
                     items=[dict(product='Marka süt',unit='1 litre / adet',price='35.00')])
         data.update(changes)
-        app.create_invoice(data)
+        return app.create_invoice(data)
 
     def test_due_partial_payment_and_dashboard(self):
         self.invoice()
@@ -208,7 +404,67 @@ class LedgerTests(unittest.TestCase):
         self.assertEqual(value['unit_price'],'26.3789')
         self.assertAlmostEqual(value['price'],2637.89)
         self.invoice(number='F002',issued='2026-02-01',items=[dict(product='Süt',unit='adet',price='26.3790')])
-        self.assertEqual(len(app.state()['alerts']),1)
+        self.assertEqual(app.state()['alerts'], [])
+        self.assertEqual(len(app.state()['price_histories'][0]['points']), 2)
+
+    def test_price_alerts_follow_whole_lira_boundary_in_both_directions(self):
+        for index, price in enumerate(('4.10', '4.70', '4.9999', '5.00', '4.9999'), 1):
+            self.invoice(number=f'F{index:03}', issued=f'2026-01-{index:02}',
+                         items=[dict(product='Süt', unit='adet', price=price)])
+        snapshot = app.state()
+        self.assertEqual([row['number'] for row in snapshot['alerts']], ['F005', 'F004'])
+        self.assertEqual(len(snapshot['price_histories'][0]['points']), 5)
+
+    def test_invoice_price_change_count_matches_alerts_for_only_that_invoice(self):
+        def products(milk, tea):
+            return [dict(product='Süt', unit='adet', price=milk),
+                    dict(product='Çay', unit='adet', price=tea)]
+
+        self.invoice(items=products('9.10', '20.50'))
+        second = self.invoice(number='F002', issued='2026-02-01', items=products('9.90', '21.00'))
+        third = self.invoice(number='F003', issued='2026-02-02', items=products('10.00', '21.70'))
+        snapshot = app.state()
+        for record in snapshot['invoices']:
+            count = sum(alert['invoice_id'] == record['id'] for alert in snapshot['alerts'])
+            self.assertEqual(app.invoice_price_change_count(record['id']), count)
+        self.assertEqual(app.invoice_price_change_count(second), 1)
+        self.assertEqual(app.invoice_price_change_count(third), 1)
+
+    def test_gift_quantity_does_not_change_paid_price_or_create_an_alert(self):
+        items = [dict(product='Süt', unit='koli', price='220', quantity='10',
+                      gift_quantity='1', row_number=1, line_total='2200', net='2200', vat='0')]
+        invoice = dict(firm_id=1, number='F001', issued='2026-01-01', days=30, total='2200',
+                       items=items, import_check=dict(expected_rows=[1], line_total_kind='net'))
+        app.create_invoice(invoice)
+        without_gift = dict(items[0], gift_quantity='')
+        app.create_invoice(dict(invoice, number='F002', issued='2026-01-02', items=[without_gift]))
+        snapshot = app.state()
+        self.assertEqual(snapshot['alerts'], [])
+        self.assertEqual([row['gift_quantity'] for row in snapshot['items']], ['1', '0'])
+        self.assertEqual(snapshot['totals']['total'], 440000)
+        new_price = dict(without_gift, price='230', line_total='2300', net='2300')
+        app.create_invoice(dict(invoice, number='F003', issued='2026-01-03', total='2300', items=[new_price]))
+        alert, = app.state()['alerts']
+        self.assertEqual((alert['old_price'], alert['price']), (22000, 23000))
+
+    def test_separate_gift_line_counts_toward_coverage_but_not_price_history(self):
+        paid = dict(product='Süt', unit='koli', price='220', quantity='10',
+                    row_number=1, line_total='2200', net='2200', vat='0')
+        gift = dict(paid, gift_only=True, gift_quantity='1', price='0', quantity='0',
+                    row_number=2, line_total='0', net='0')
+        invoice = dict(firm_id=1, number='F001', issued='2026-01-01', days=30, total='2200',
+                       items=[paid, gift], import_check=dict(expected_rows=[1, 2], line_total_kind='net'))
+        app.create_invoice(invoice)
+        app.create_invoice(dict(invoice, number='F002', issued='2026-01-02',
+                                items=[paid], import_check=dict(expected_rows=[1], line_total_kind='net')))
+        snapshot = app.state()
+        gift_row, = [row for row in snapshot['items'] if row['gift_only']]
+        self.assertEqual((gift_row['price'], gift_row['gift_quantity']), (0, '1'))
+        self.assertEqual(snapshot['totals']['total'], 440000)
+        self.assertEqual(snapshot['alerts'], [])
+        self.assertEqual([point['price'] for point in snapshot['price_histories'][0]['points']], [22000, 22000])
+        with self.assertRaisesRegex(ValueError, 'bedelsiz'):
+            app.create_invoice(dict(invoice, items=[paid, dict(gift, gift_quantity='0')]), record_id=1)
 
     def test_quantity_and_product_code_are_saved_and_editable(self):
         self.invoice(items=[dict(product='Süt 200MLX24',unit='adet',price='26.3789',quantity='18',code='8223298',net='470.13',vat='4.69')])
@@ -295,13 +551,13 @@ class LedgerTests(unittest.TestCase):
 
     def test_price_approval_invalidates_when_either_price_changes(self):
         self.invoice()
-        self.invoice(number='F002',issued='2026-02-01',items=[dict(product='Marka süt',unit='1 litre / adet',price='35.01')])
+        self.invoice(number='F002',issued='2026-02-01',items=[dict(product='Marka süt',unit='1 litre / adet',price='36.01')])
         alert=app.state()['alerts'][0]
         self.assertFalse(alert['approved'])
         with app.connect() as db:
             db.execute('INSERT INTO price_reviews VALUES(?,?)',(alert['fingerprint'],'2026-02-01'))
         self.assertTrue(app.state()['alerts'][0]['approved'])
-        app.create_invoice(dict(firm_id=1,number='F001',issued='2026-01-20',days=20,total='1000.50',items=[dict(product='Marka süt',unit='1 litre / adet',price='36')]),1)
+        app.create_invoice(dict(firm_id=1,number='F001',issued='2026-01-20',days=20,total='1000.50',items=[dict(product='Marka süt',unit='1 litre / adet',price='37')]),1)
         changed=app.state()['alerts'][0]
         self.assertFalse(changed['approved'])
         self.assertLess(changed['change'],0)

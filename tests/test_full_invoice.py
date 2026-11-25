@@ -67,7 +67,7 @@ class FullInvoiceTests(unittest.TestCase):
             [(item['row_number'], item['code'], item['quantity']) for item in draft['items']],
             [(number, code, str(Decimal(quantity))) for number, code, _, quantity, *_ in ROWS],
         )
-        self.assertEqual(draft['items'][0]['price'], '26.38')
+        self.assertEqual(draft['items'][0]['price'], '26.3789')
         self.assertEqual(draft['items'][-1]['line_total'], '0.01')
 
     def test_complementary_layouts_are_merged_by_row_number(self):

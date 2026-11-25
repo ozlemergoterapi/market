@@ -1,5 +1,7 @@
 import unittest
 
+from app import apply_supplier_layout
+from invoice_parser import merge_readings
 from invoice_ocr import parse_tsv_table, _clean_product
 
 
@@ -46,6 +48,26 @@ class TsvBuilder:
 
 
 class InvoiceTsvTests(unittest.TestCase):
+    def test_supplier_layout_reads_net_before_vat_and_reconciles_total(self):
+        table = TsvBuilder()
+        table.item(1, "1111111", "Çay", 10, "10,00", "100,00", "8,00", 100)
+        table.item(2, "2222222", "Şeker", 5, "10,00", "50,00", "4,00", 150)
+        draft = merge_readings([dict(total='162.00', firm_id=7, items=[],
+                                     import_check={'expected_rows':[1, 2]})])
+        layouts = {7: ('Örnek Gıda', 'net_vat')}
+        result = apply_supplier_layout(draft, [table.text()], layouts)
+        self.assertEqual(result['coverage']['errors'], [])
+        self.assertEqual([(row['net'], row['vat']) for row in result['items']],
+                         [('100.00', '8.00'), ('50.00', '4.00')])
+        self.assertEqual([row['source_price'] for row in result['items']], ['10', '10'])
+        self.assertIn('Örnek Gıda', result['warnings'][0])
+        wrong_total = apply_supplier_layout(dict(draft, total='163.00'), [table.text()], layouts)
+        self.assertEqual(wrong_total['items'], [])
+        self.assertIn('doğrulanamadı', wrong_total['warnings'][-1])
+        mismatch = apply_supplier_layout(draft, [table.text()], layouts, selected_firm=8)
+        self.assertEqual(mismatch['items'], [])
+        self.assertIn('uyuşmadı', mismatch['warnings'][-1])
+
     def test_unambiguous_package_glyphs_are_cleaned(self):
         self.assertEqual(
             _clean_product('PET FRK GAZOZ 2.51 6X 20KCAL FE'),
@@ -66,7 +88,7 @@ class InvoiceTsvTests(unittest.TestCase):
         first = result["items"][0]
         self.assertEqual(first["code"], "8223298")
         self.assertEqual(first["quantity"], "18")
-        self.assertEqual(first["price"], "26.38")
+        self.assertEqual(first["price"], "26.3789")
         self.assertEqual(first["line_total"], "470.13")
         self.assertEqual(first["vat"], "4.69")
         self.assertIn("96GX18", first["product"])

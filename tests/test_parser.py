@@ -1,8 +1,53 @@
 import unittest
-from invoice_parser import parse_invoice
+from invoice_parser import merge_readings, parse_invoice
 
 
 class ParserTests(unittest.TestCase):
+    def test_seller_name_fallback_does_not_choose_buyer_company(self):
+        firms = [dict(id=1, name='Güneş Gıda', tax_number='1234567890')]
+        for text in ('Satıcı: Örnek Market\nSayın Güneş Gıda\nVKN: 1234567890',
+                     'Satıcı: Örnek Market   Alıcı: Güneş Gıda'):
+            with self.subTest(text=text):
+                draft = merge_readings([parse_invoice(text, firms)])
+                self.assertIsNone(draft['firm_id'])
+                self.assertEqual(draft['seller_name_hint'], '')
+
+    def test_ocr_unit_price_preserves_whole_lira_boundary(self):
+        draft = parse_invoice('1 Örnek Süt 100 Adet 4,9999 TL 0,00 TL 499,99 TL\nÖdenecek Tutar 499,99 TL')
+        self.assertEqual(draft['items'][0]['price'], '4.9999')
+
+    def test_ettn_reads_labelled_wrapped_uuid_and_rejects_conflicting_readings(self):
+        first = parse_invoice('ETTN: 13A2CB00-381D-\n4BF7-8AA0-123456789ABC')
+        second = parse_invoice('Evrensel Tekil Tanımlama Numarası: 81fe0614-fc00-4676-a5df-753278949bff')
+        self.assertEqual(first['ettn'], '13a2cb00-381d-4bf7-8aa0-123456789abc')
+        self.assertEqual(parse_invoice(first['ettn'])['ettn'], '')
+        merged = merge_readings([first, second])
+        self.assertEqual(merged['ettn'], '')
+        self.assertTrue(any('Birden fazla ETTN' in warning for warning in merged['warnings']))
+
+    def test_seller_tax_number_takes_priority_over_buyer_name_and_number(self):
+        firms = [dict(id=1, name='Yıldız Gıda', tax_number='0123456789'),
+                 dict(id=2, name='Güneş Gıda', tax_number='9876543210')]
+        text = '''Fatura No: ABC2026000000001
+Satıcı
+Başka Ticaret Ltd
+VKN: 012 345 6789
+Sayın Güneş Gıda
+VKN: 9876543210'''
+        verified = parse_invoice(text, firms)
+        self.assertEqual((verified['firm_id'], verified['supplier_tax_numbers']), (1, ['0123456789']))
+        by_name = parse_invoice('Güneş Gıda', firms)
+        self.assertEqual(merge_readings([by_name, verified])['firm_id'], 1)
+        unknown = parse_invoice(text.replace('012 345 6789', '1111111111'), firms)
+        self.assertIsNone(merge_readings([unknown, by_name])['firm_id'])
+        self.assertIsNone(merge_readings([unknown, verified])['firm_id'])
+
+    def test_buyer_tax_number_alone_does_not_select_a_supplier(self):
+        firms = [dict(id=1, name='Yıldız Gıda', tax_number='0123456789')]
+        draft = parse_invoice('Alıcı\nÖrnek Market\nVergi Kimlik Numarası: 0123456789', firms)
+        self.assertIsNone(draft['firm_id'])
+        self.assertEqual(draft['supplier_tax_numbers'], [])
+
     def test_turkish_invoice_with_overlap_discount_and_wrapped_name(self):
         text = '''KÖSEOĞLU GIDA VE MEŞRUBAT PAZ.LTD.ŞTİ
 Belge No: E102026000001584
@@ -21,7 +66,7 @@ Toplam İskonto (%5,78) 739,73 TL
         self.assertEqual(draft['issued'],'2026-10-22')
         self.assertEqual(draft['total'],'12189.73')
         self.assertEqual(len(draft['items']),2)
-        self.assertEqual(draft['items'][0]['price'],'26.38')
+        self.assertEqual(draft['items'][0]['price'],'26.3789')
         self.assertIn('96GX18',draft['items'][0]['product'])
         self.assertTrue(any('uyuşmuyor' in w for w in draft['warnings']))
 
@@ -37,7 +82,7 @@ Toplam İskonto (%5,78) 739,73 TL
         draft = parse_invoice('''Fatura Tarihi 03.11.2026
 1 1234567 SÜT 1L 2 Adet 10,0000 TL % 1,00 0,20 TL 20,00 TL
 Ödenecek Tutar 20,20 TL''')
-        self.assertEqual(draft['items'][0]['price'],'10.10')
+        self.assertEqual(draft['items'][0]['price'],'10.1000')
         self.assertFalse(any('uyuşmuyor' in w for w in draft['warnings']))
 
     def test_invalid_date_is_left_blank(self):

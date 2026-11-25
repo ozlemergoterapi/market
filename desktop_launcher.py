@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import os
+from concurrent.futures import Future, TimeoutError
 from pathlib import Path
+from queue import Empty, Queue
 import sys
 import threading
 import time
@@ -45,6 +47,48 @@ def resource_path(relative):
     return base / relative
 
 
+def show_invoice_confirmation(window, summary):
+    from tkinter import BooleanVar, Button, Checkbutton, Label, Toplevel
+
+    window.deiconify()
+    dialog = Toplevel(window, padx=20, pady=16)
+    dialog.title('Fatura onayı')
+    dialog.transient(window)
+    dialog.resizable(False, False)
+    dialog.attributes('-topmost', True)
+    checked = BooleanVar(dialog)
+    confirmed = False
+
+    def approve():
+        nonlocal confirmed
+        if checked.get():
+            confirmed = True
+            dialog.destroy()
+
+    Label(dialog, text='Faturayı kaydetmeden önce kontrolünüzü onaylayın.').pack(anchor='w')
+    firm, number, total = summary
+    Label(dialog, text=f'Firma: {firm}\nFatura: {number}\nToplam: {total}',
+          justify='left', wraplength=380).pack(anchor='w', pady=(8, 0))
+    checkbox = Checkbutton(
+        dialog, variable=checked, wraplength=380, justify='left',
+        text='Ürün adlarını, kodlarını, miktarları, faturadaki tutarları, KDV’leri ve ödeme tarihini karşılaştırdım.',
+        command=lambda: save.configure(state='normal' if checked.get() else 'disabled'),
+    )
+    checkbox.pack(anchor='w', pady=12)
+    save = Button(dialog, text='Onayla ve kaydet', command=approve, state='disabled')
+    save.pack(side='right', padx=(8, 0))
+    Button(dialog, text='Vazgeç', command=dialog.destroy).pack(side='right')
+    dialog.bind('<Escape>', lambda _event: dialog.destroy())
+    timer = window.after(120_000, dialog.destroy)
+    dialog.wait_visibility()
+    dialog.grab_set()
+    dialog.lift()
+    checkbox.focus_force()
+    dialog.wait_window()
+    window.after_cancel(timer)
+    return confirmed
+
+
 def main():
     from tkinter import Button, Label, PhotoImage, Tk, messagebox
 
@@ -65,6 +109,39 @@ def main():
 
     app.init()
     error_log = storage / 'startup-error.log'
+    confirmations = Queue()
+    confirmation_lock = threading.Lock()
+
+    class DesktopHandler(app.Handler):
+        def confirm_invoice(self, summary):
+            if not confirmation_lock.acquire(blocking=False):
+                raise ValueError('Masaüstünde açık olan fatura onayını tamamlayın.')
+            try:
+                answer = Future()
+                confirmations.put((answer, summary))
+                try:
+                    return answer.result(timeout=125)
+                except TimeoutError:
+                    answer.cancel()
+                    return False
+            finally:
+                confirmation_lock.release()
+
+    def poll_confirmation():
+        try:
+            answer, summary = confirmations.get_nowait()
+        except Empty:
+            pass
+        else:
+            if answer.set_running_or_notify_cancel():
+                try:
+                    confirmed = show_invoice_confirmation(window, summary)
+                except Exception:
+                    with error_log.open('a', encoding='utf-8') as log:
+                        traceback.print_exc(file=log)
+                    confirmed = False
+                answer.set_result(confirmed)
+        window.after(100, poll_confirmation)
 
     class LoggedHTTPServer(app.ThreadingHTTPServer):
         def handle_error(self, request, client_address):
@@ -73,13 +150,14 @@ def main():
                 traceback.print_exc(file=log)
 
     try:
-        server = LoggedHTTPServer(('127.0.0.1', 0), app.Handler)
+        server = LoggedHTTPServer(('127.0.0.1', 0), DesktopHandler)
     except OSError as error:
         raise RuntimeError('Yerel uygulama sunucusu başlatılamadı: ' + str(error)) from error
 
     address = 'http://127.0.0.1:' + str(server.server_port)
     worker = threading.Thread(target=server.serve_forever, name='sancakli-market', daemon=True)
     worker.start()
+    stop_backup = app.start_periodic_backup()
 
     window = Tk()
     window.title('Sancaklı Market')
@@ -137,6 +215,7 @@ def main():
         if closing:
             return
         closing = True
+        stop_backup.set()
         server.shutdown()
         server.server_close()
         window.destroy()
@@ -147,6 +226,7 @@ def main():
     # title-bar close action as minimize so users do not unknowingly keep a
     # disconnected, cached page open. The explicit button performs shutdown.
     window.protocol('WM_DELETE_WINDOW', window.iconify)
+    window.after(100, poll_confirmation)
     window.after(700, open_application)
     window.mainloop()
 
