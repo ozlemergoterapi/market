@@ -12,6 +12,7 @@ import subprocess
 import sys
 import tempfile
 from calendar import monthrange
+from collections import defaultdict
 from threading import Event, Lock, Thread
 from contextlib import closing
 from datetime import date, datetime, timedelta, timezone
@@ -754,6 +755,36 @@ def invoice_price_change_count(invoice_id):
                whole_lira_price_changed(row['current'], row['previous']) for row in comparisons)
 
 
+def product_price_history(item_id):
+    with closing(connect()) as db, db:
+        db.execute('BEGIN')
+        selected = db.execute('''SELECT i.firm_id FROM items t JOIN invoices i ON i.id=t.invoice_id
+            WHERE t.id=? AND t.gift_only=0''', (item_id,)).fetchone()
+        if not selected:
+            raise ValueError('Ürün alış kaydı bulunamadı.')
+        items = [dict(row) for row in db.execute('''SELECT t.*,i.firm_id,i.issued,i.number,f.name AS firm
+            FROM items t JOIN invoices i ON i.id=t.invoice_id JOIN firms f ON f.id=i.firm_id
+            WHERE i.firm_id=? AND t.gift_only=0 ORDER BY i.issued,i.id,t.id''', (selected['firm_id'],))]
+        decisions = [dict(row) for row in db.execute('SELECT * FROM product_matches')]
+    comparisons, _, _ = compare_items(items, decisions, include_suggestions=False)
+    links = defaultdict(set)
+    for comparison in comparisons:
+        current, previous = comparison['current']['id'], comparison['previous']['id']
+        links[current].add(previous)
+        links[previous].add(current)
+    matching_ids = {item_id}
+    pending = [item_id]
+    while pending:
+        unseen = links[pending.pop()] - matching_ids
+        matching_ids.update(unseen)
+        pending.extend(unseen)
+    item = next(item for item in items if item['id'] == item_id)
+    points = [dict(invoice_id=row['invoice_id'], issued=row['issued'], number=row['number'],
+                   product=row['product'], price=float(Decimal(row['unit_price'])*100))
+              for row in items if row['id'] in matching_ids]
+    return dict(product=item['product'], firm=item['firm'], unit=item['unit'], code=item['code'], points=points)
+
+
 def state(today=None, include_analysis=True, db_path=None):
     today = today or datetime.now(ISTANBUL).date()
     with closing(connect(db_path)) as db, db:
@@ -1435,6 +1466,11 @@ class Handler(BaseHTTPRequestHandler):
                 return self.respond({'count':invoice_price_change_count(invoice_id)})
             except ValueError:
                 return self.respond({'error':'Fatura bulunamadı.'},404)
+        if self.path.startswith('/api/product-price-history/'):
+            try:
+                return self.respond(product_price_history(int(self.path.rsplit('/', 1)[1])))
+            except ValueError:
+                return self.respond({'error':'Ürün alış kaydı bulunamadı.'},404)
         if self.path.startswith('/api/monthly-purchases/'):
             try:
                 return self.respond(monthly_purchases(self.path.rsplit('/', 1)[1]))
