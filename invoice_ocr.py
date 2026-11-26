@@ -680,6 +680,72 @@ def _page_items(words, amount_order=None):
     return parsed, [anchor.number for anchor in anchors], warnings
 
 
+def _seller_and_manufacturer_table(words):
+    """Read e-invoices with separate seller and manufacturer code columns."""
+    for ordinal_heading in (word for word in words if _plain(word.text)=='sira'):
+        headers = sorted(
+            (word for word in words if abs(word.center_y-ordinal_heading.center_y)<=ordinal_heading.height*1.4),
+            key=lambda word: word.left,
+        )
+        by_name = {}
+        for word in headers:
+            by_name.setdefault(_plain(word.text), []).append(word)
+        if not all(key in by_name for key in ('satici','uretici','miktar','birim','iskonto','diger')):
+            continue
+        if any(len(by_name.get(key, []))!=2 for key in ('mal','hizmet','kdv')):
+            continue
+        description, total = by_name['mal']
+        seller, manufacturer, quantity, unit_price, other = (
+            by_name[key][0] for key in ('satici','uretici','miktar','birim','diger')
+        )
+        _, vat = by_name['kdv']
+        if not ordinal_heading.left<description.left<seller.left<manufacturer.left<quantity.left<unit_price.left<vat.left<other.left<total.left:
+            continue
+        header_end = max(word.top+word.height for word in headers)
+        footer = min((word.top for word in words if word.top>header_end and word.left>quantity.left
+                      and _plain(word.text) in ('toplam','odenecek')), default=float('inf'))
+        ordinal_end = ordinal_heading.right
+        description_end = (by_name['hizmet'][0].right+seller.left)/2
+        seller_end = (seller.right+manufacturer.left)/2
+        ordinals = sorted(
+            (word for word in words if header_end<word.center_y<footer and
+             ordinal_heading.left-ordinal_heading.width<=word.center_x<ordinal_end and
+             re.fullmatch(r'[0-9]{1,3}', word.text) and 1<=int(word.text)<=500),
+            key=lambda word: word.center_y,
+        )
+        if not ordinals:
+            continue
+        if footer == float('inf'):
+            spacing = ordinals[-1].center_y-ordinals[-2].center_y if len(ordinals)>1 else ordinals[0].height*4
+            footer = ordinals[-1].center_y + spacing*.55
+        rows, numbers, warnings = [], [], []
+        for index, ordinal in enumerate(ordinals):
+            number = int(ordinal.text)
+            numbers.append(number)
+            top = header_end if index==0 else (ordinal.center_y+ordinals[index-1].center_y)/2
+            bottom = footer if index==len(ordinals)-1 else (ordinal.center_y+ordinals[index+1].center_y)/2
+            band = [word for word in words if top<=word.center_y<bottom]
+            cells = [word for word in band if abs(word.center_y-ordinal.center_y)<=ordinal.height*.65]
+            try:
+                name = _column_text(band, ordinal_end, description_end)
+                code = re.sub(r'\s+', '', _column_text(cells, description_end, seller_end))
+                qty, unit = _quantity(_column_text(cells, quantity.left-ordinal.width, unit_price.left))
+                raw = _amount(_column_text(cells, unit_price.left, by_name['iskonto'][0].left))
+                vat_value = _amount(_column_text(cells, vat.left, other.left))
+                net = _amount(_column_text(cells, total.left, float('inf')))
+                if not name or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9.-]{1,39}', code) or min(qty,raw,net)<=0:
+                    raise ValueError()
+                item = dict(row_number=number, product=name, code=code, quantity=_decimal_text(qty),
+                            unit=unit, price=str(paid_unit_price(net+vat_value, qty)),
+                            source_price=_decimal_text(raw), line_total=f'{net:.2f}', net=f'{net:.2f}',
+                            vat=f'{vat_value:.2f}', review='')
+                rows.append((item, ordinal.confidence))
+            except (KeyError, InvalidOperation, ValueError):
+                warnings.append(f'{number}. ürün satırının hücreleri eksiksiz okunamadı; faturayla karşılaştırın.')
+        return rows, numbers, warnings
+    return None
+
+
 def parse_tsv_table(tsv_text, amount_order=None):
     """Return parse_invoice-compatible items reconstructed from TSV words.
 
@@ -695,11 +761,18 @@ def parse_tsv_table(tsv_text, amount_order=None):
     candidates = {}
     detected = set()
     warnings = []
+    labeled_pages = 0
     for page_words in pages.values():
-        rows, numbers, page_warnings = _page_items(page_words, amount_order)
-        generic_rows, generic_numbers, generic_warnings = _page_items_without_codes(page_words, amount_order)
-        if len(generic_rows) > len(rows):
-            rows, numbers, page_warnings = generic_rows, generic_numbers, generic_warnings
+        labeled = _seller_and_manufacturer_table(page_words) if not amount_order else None
+        if labeled is not None:
+            rows, numbers, page_warnings = labeled
+            if len(rows)==len(numbers) and numbers==list(range(numbers[0],numbers[-1]+1)):
+                labeled_pages += 1
+        else:
+            rows, numbers, page_warnings = _page_items(page_words, amount_order)
+            generic_rows, generic_numbers, generic_warnings = _page_items_without_codes(page_words, amount_order)
+            if len(generic_rows) > len(rows):
+                rows, numbers, page_warnings = generic_rows, generic_numbers, generic_warnings
         detected.update(numbers)
         warnings.extend(page_warnings)
         for item, confidence in rows:
@@ -756,6 +829,7 @@ def parse_tsv_table(tsv_text, amount_order=None):
     if not detected:
         warnings.append("TSV içinde ürün sıra numarası ve ürün kodu birlikte bulunamadı.")
     return {
+        "labeled_pages": labeled_pages,
         "items": items,
         "expected_rows": expected_rows,
         "detected_rows": sorted(detected),

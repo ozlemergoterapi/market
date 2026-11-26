@@ -48,6 +48,38 @@ class TsvBuilder:
 
 
 class InvoiceTsvTests(unittest.TestCase):
+    def test_reads_seller_code_and_wrapped_description_in_e_invoice(self):
+        table = TsvBuilder()
+        for label, left in [('Sıra', 143), ('Mal', 230), ('Hizmet', 290),
+                            ('Satıcı', 444), ('Üretici', 650), ('Miktar', 846),
+                            ('Birim', 950), ('İskonto', 1111), ('KDV', 1360),
+                            ('KDV', 1536), ('Diğer', 1741), ('Mal', 1877), ('Hizmet', 1938)]:
+            table.add(label, left, 100)
+        for number, top, name in [(1, 190, 'Peynir'), (2, 320, 'Yoğurt')]:
+            table.add(str(number), 154, top)
+            table.add(name, 205, top - 35)
+            table.add('X', 205, top + 35)
+            table.add('8', 227, top + 35)
+            table.add(f'01.02.000{number}', 447, top)
+            table.add(f'900000{number}', 660, top)
+            table.add('10', 868, top)
+            table.add('Adet', 894, top)
+            table.add('20,00', 975, top)
+            table.add('2,00', 1630, top)
+            table.add('200,00', 1955, top)
+        table.add('Toplam', 1580, 400)
+        table.add('Not:', 205, 435)
+
+        result = parse_tsv_table(table.text())
+
+        self.assertEqual(result['labeled_pages'], 1)
+        self.assertEqual(result['expected_rows'], [1, 2])
+        self.assertEqual(result['warnings'], [])
+        self.assertEqual([(row['product'], row['code'], row['quantity'], row['net'], row['vat'])
+                          for row in result['items']],
+                         [('Peynir X 8', '01.02.0001', '10', '200.00', '2.00'),
+                          ('Yoğurt X 8', '01.02.0002', '10', '200.00', '2.00')])
+
     def test_supplier_layout_reads_net_before_vat_and_reconciles_total(self):
         table = TsvBuilder()
         table.item(1, "1111111", "Çay", 10, "10,00", "100,00", "8,00", 100)

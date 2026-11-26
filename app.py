@@ -537,6 +537,7 @@ def tsv_reading(tsv_text, amount_order=None):
         number='', issued='', total='', supplier='', firm_id=None,
         items=table['items'], warnings=[], table_warnings=table['warnings'],
         sources={}, import_check={'expected_rows': table['expected_rows'],'detected_rows':table.get('detected_rows',[]),'line_total_kind':'net'},
+        labeled_pages=table['labeled_pages'],
     )
 
 
@@ -582,6 +583,9 @@ def pdf_text_readings(layers, firms, coordinates=None):
         coordinates.append(coordinate_text)
     positioned = tsv_reading(coordinate_text)
     plain = parse_invoice('\n'.join(visible_pages), firms)
+    if positioned['labeled_pages'] == len(layers) and positioned['import_check']['detected_rows'] == positioned['import_check']['expected_rows']:
+        plain['items'] = []
+        plain['import_check'] = {}
     positioned_rows={item['row_number'] for item in positioned['items']}
     plain['items']=[item for item in plain['items'] if item['row_number'] not in positioned_rows]
     return [positioned,plain], '\n'.join(visible_pages)
@@ -1590,8 +1594,6 @@ class Handler(BaseHTTPRequestHandler):
                 photos = [photo(p) for p in photos]
                 if not all(photos):
                     raise ValueError('Fotoğraf verisi geçersiz.')
-                photos = ocr_photo_variants(photos)
-                executable, lang = ocr_engine()
                 with connect() as db:
                     firms = [dict(r) for r in db.execute('''SELECT id,name,tax_number FROM firms WHERE merged_into IS NULL AND archived=0
                       UNION ALL SELECT f.id,p.supplier_alias,f.tax_number FROM firm_ocr_profiles p
@@ -1606,6 +1608,9 @@ class Handler(BaseHTTPRequestHandler):
                 if pdf_readings:
                     readings.extend(pdf_readings)
                     visible_text.append('--- PDF içindeki orijinal metin ---\n'+pdf_text)
+
+                photos = ocr_photo_variants(photos)
+                executable, lang = ocr_engine()
 
                 def add_layout(mode, with_tsv=True, supplemental=False):
                     existing = {
