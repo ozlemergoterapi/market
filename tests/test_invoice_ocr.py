@@ -48,6 +48,52 @@ class TsvBuilder:
 
 
 class InvoiceTsvTests(unittest.TestCase):
+    def test_compact_brand_table_preserves_pack_size_and_product_code(self):
+        for code_header, code in [('Ürün', 'ABC-001'), ('Barkod', '8691234567890')]:
+            with self.subTest(code_header=code_header):
+                table = TsvBuilder()
+                for value, left in [('S.N', 142), ('Marka', 260), (code_header, 384),
+                                    ('Mal/Hizmet', 908), ('Miktar', 1333), ('Birim', 1403),
+                                    ('Fiyat', 1554), ('KDV', 1695), ('KDV', 1790),
+                                    ('Tutarı', 1835), ('Tutar', 1963)]:
+                    table.add(value, left, 100)
+                if code_header == 'Ürün':
+                    table.add('Kodu', 446, 100)
+                for value, left in [('1', 165), ('ÖRNEK', 260), (code, 387), ('Bisküvi', 604),
+                                    ('X', 905), ('24', 935), ('Ad', 970), ('2', 1357),
+                                    ('Koli', 1404), ('20,00', 1505), ('%10,00', 1695),
+                                    ('4,00', 1820), ('40,00', 1960)]:
+                    table.add(value, left, 150)
+
+                result = parse_tsv_table(table.text())
+
+                self.assertEqual(result['labeled_pages'], 1)
+                self.assertEqual(result['expected_rows'], [1])
+                row = result['items'][0]
+                self.assertEqual((row['code'], row['product'], row['quantity'], row['unit'], row['net'], row['vat']),
+                                 (code, 'Bisküvi X 24 Ad', '2', 'koli', '40.00', '4.00'))
+
+    def test_multiline_product_code_table_rejoins_separate_cells(self):
+        table = TsvBuilder()
+        table.add('Sıra', 140, 94, width=30)
+        for value, left in [('Ürün', 205), ('Kodu', 281), ('Mal', 350), ('Hizmet', 405),
+                            ('Miktar', 776), ('Birim', 933), ('Fiyat', 1008), ('KDV', 1122),
+                            ('Oranı', 1181), ('KDV', 1270), ('Tutarı', 1325), ('Diğer', 1483)]:
+            table.add(value, left, 100)
+        for value, left, top in [('ERP', 205, 160), ('STK-', 240, 160), ('000123', 205, 174),
+                                 ('Meyve', 350, 160), ('Suyu', 400, 160), ('X', 350, 174),
+                                 ('12', 370, 174), ('Ad', 395, 174), ('1', 150, 167),
+                                 ('2', 850, 167), ('Koli', 875, 167), ('20,00', 975, 160),
+                                 ('4,00', 1360, 167), ('40,00', 1930, 167)]:
+            table.add(value, left, top)
+
+        result = parse_tsv_table(table.text())
+
+        self.assertEqual(result['expected_rows'], [1])
+        row = result['items'][0]
+        self.assertEqual((row['code'], row['product'], row['source_price']),
+                         ('ERP STK-000123', 'Meyve Suyu X 12 Ad', '20'))
+
     def test_reads_seller_code_and_wrapped_description_in_e_invoice(self):
         table = TsvBuilder()
         for label, left in [('Sıra', 143), ('Mal', 230), ('Hizmet', 290),

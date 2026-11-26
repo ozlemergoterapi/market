@@ -746,6 +746,94 @@ def _seller_and_manufacturer_table(words):
     return None
 
 
+def _product_code_table(words):
+    """Read the compact brand/code table and its older multiline variant."""
+    for quantity in (word for word in words if _plain(word.text) == 'miktar'):
+        headers = {}
+        for word in sorted(words, key=lambda value: value.left):
+            if abs(word.center_y - quantity.center_y) <= quantity.height * .75:
+                headers.setdefault(_plain(word.text), []).append(word)
+        modern = 's.n' in headers and 'marka' in headers and 'mal/hizmet' in headers
+        legacy = all(key in headers for key in ('urun', 'kodu', 'mal', 'hizmet', 'diger', 'orani'))
+        if not (modern or legacy) or len(headers.get('kdv', [])) != 2:
+            continue
+        if not all(key in headers for key in ('birim', 'fiyat', 'tutari')):
+            continue
+        code_heading = headers.get('barkod') or headers.get('urun')
+        if not code_heading or (modern and 'tutar' not in headers):
+            continue
+        if legacy:
+            ordinal_heading = next((word for word in words if _plain(word.text) == 'sira'
+                                    and abs(word.center_y - quantity.center_y) < quantity.height), None)
+            if ordinal_heading is None:
+                continue
+            code_left = (ordinal_heading.right + code_heading[0].left) / 2
+            ordinal_right = code_left
+            name_left = headers['mal'][0].left - quantity.height * .15
+            net_left = headers['diger'][0].right
+            price_left = headers['birim'][0].left
+        else:
+            ordinal_heading = headers['s.n'][0]
+            ordinal_right = ordinal_heading.right + quantity.height
+            code_left = code_heading[0].left - quantity.height
+            net_left = (headers['tutari'][0].right + headers['tutar'][0].center_x) / 2
+            price_left = headers['birim'][0].right
+        rate, vat = headers['kdv']
+        header_end = quantity.center_y + quantity.height
+        footer = min((word.top for word in words if word.top > header_end
+                      and word.left > quantity.left and _plain(word.text) in ('toplam', 'odenecek')),
+                     default=float('inf'))
+        ordinals = sorted(
+            (word for word in words if header_end < word.center_y < footer
+             and ordinal_heading.left <= word.center_x < ordinal_right
+             and re.fullmatch(r'[1-9][0-9]{0,2}', word.text)),
+            key=lambda word: word.center_y,
+        )
+        if not ordinals:
+            continue
+
+        if modern:
+            # Descriptions are left-aligned under a centered heading.
+            description = headers['mal/hizmet'][0]
+            starts = []
+            code_right = headers.get('kodu', code_heading)[0].right
+            for ordinal in ordinals:
+                starts.extend(word.left for word in words
+                              if code_right + quantity.height * 2 < word.left < description.center_x
+                              and abs(word.center_y - ordinal.center_y) <= quantity.height * .6)
+            if not starts:
+                continue
+            name_left = statistics.mode(starts) - quantity.height * .15
+
+        rows, numbers, warnings = [], [], []
+        for index, ordinal in enumerate(ordinals):
+            number = int(ordinal.text)
+            numbers.append(number)
+            top = (ordinal.center_y + ordinals[index-1].center_y) / 2 if index else header_end
+            bottom = ((ordinal.center_y + ordinals[index+1].center_y) / 2
+                      if index+1 < len(ordinals) else min(footer, ordinal.center_y + ordinal.height * 1.4))
+            band = [word for word in words if top <= word.center_y < bottom]
+            try:
+                name = _visual_text([word for word in band if name_left <= word.left < quantity.left])
+                code = _visual_text([word for word in band if code_left <= word.left < name_left])
+                code = re.sub(r'(?<=-)\s+', '', code)
+                qty, unit = _quantity(_column_text(band, quantity.left, price_left))
+                raw = _amount(_column_text(band, price_left, rate.left))
+                vat_value = _amount(_column_text(band, vat.left - quantity.height, net_left))
+                net = _amount(_column_text(band, net_left, float('inf')))
+                if not name or not code or qty <= 0:
+                    raise ValueError()
+                item = dict(row_number=number, product=name, code=code, quantity=_decimal_text(qty),
+                            unit=unit, price=str(paid_unit_price(net+vat_value, qty)),
+                            source_price=_decimal_text(raw), line_total=f'{net:.2f}', net=f'{net:.2f}',
+                            vat=f'{vat_value:.2f}', review='')
+                rows.append((item, ordinal.confidence))
+            except (InvalidOperation, ValueError):
+                warnings.append(f'{number}. ürün satırının hücreleri eksiksiz okunamadı; faturayla karşılaştırın.')
+        return rows, numbers, warnings
+    return None
+
+
 def parse_tsv_table(tsv_text, amount_order=None):
     """Return parse_invoice-compatible items reconstructed from TSV words.
 
@@ -763,7 +851,9 @@ def parse_tsv_table(tsv_text, amount_order=None):
     warnings = []
     labeled_pages = 0
     for page_words in pages.values():
-        labeled = _seller_and_manufacturer_table(page_words) if not amount_order else None
+        labeled = None if amount_order else (
+            _seller_and_manufacturer_table(page_words) or _product_code_table(page_words)
+        )
         if labeled is not None:
             rows, numbers, page_warnings = labeled
             if len(rows)==len(numbers) and numbers==list(range(numbers[0],numbers[-1]+1)):
