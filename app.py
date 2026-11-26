@@ -538,6 +538,7 @@ def tsv_reading(tsv_text, amount_order=None):
         items=table['items'], warnings=[], table_warnings=table['warnings'],
         sources={}, import_check={'expected_rows': table['expected_rows'],'detected_rows':table.get('detected_rows',[]),'line_total_kind':'net'},
         labeled_pages=table['labeled_pages'],
+        table_pages=table['table_pages'],
     )
 
 
@@ -615,6 +616,21 @@ def apply_supplier_layout(draft, coordinates, layouts, selected_firm=None, pdf_c
     return dict(draft, warnings=draft['warnings'] + [
         f'{name} için kayıtlı sütun düzeni fatura toplamıyla doğrulanamadı. Genel okuma gösteriliyor.'
     ])
+
+
+def verified_pdf_draft(readings):
+    positioned, header = readings
+    check = positioned['import_check']
+    if (not positioned['labeled_pages'] or positioned['labeled_pages'] != positioned['table_pages']
+            or positioned['table_warnings']
+            or check['expected_rows'] != check['detected_rows']
+            or any(not row['code'] or row['review'] for row in positioned['items'])):
+        return None
+    # Use plain text for the header only. Every item must come from table cells.
+    draft = merge_readings([positioned, dict(header, items=[], import_check={})])
+    if draft['items'] and not draft['coverage']['errors'] and all(draft[key] for key in ('number', 'issued', 'total')):
+        return draft
+    return None
 
 
 def ocr_engine():
@@ -1608,6 +1624,11 @@ class Handler(BaseHTTPRequestHandler):
                 if pdf_readings:
                     readings.extend(pdf_readings)
                     visible_text.append('--- PDF içindeki orijinal metin ---\n'+pdf_text)
+                    if (not selected_firm and data.get('source_page_count') == len(pdf_layers)
+                            and all(layer['words'] for layer in pdf_layers)):
+                        draft = verified_pdf_draft(pdf_readings)
+                        if draft:
+                            return self.respond({'text': visible_text[0], 'language': 'PDF', 'draft': draft})
 
                 photos = ocr_photo_variants(photos)
                 executable, lang = ocr_engine()

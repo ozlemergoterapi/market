@@ -28,7 +28,7 @@ function formDraftKey(form){
   if(!kind)return null;
   if(kind==='firm'&&form.dataset.fromInvoice==='1')return null;
   const edit=form.dataset.editId;
-  if(kind==='invoice'&&edit)return form.dataset.invoiceIdentity?'invoice:uid:'+form.dataset.invoiceIdentity:null;
+  if(kind==='invoice')return edit&&form.dataset.invoiceIdentity?'invoice:uid:'+form.dataset.invoiceIdentity:null;
   return kind+':'+(edit&&kind==='payment'?form.dataset.paymentType+':'+edit:edit||'new');
 }
 function formDraftSnapshot(form){
@@ -899,17 +899,24 @@ $('#new-credit').onclick=()=>openAccountEntry('credit');
 function openInvoiceForm(existingFirmId=null){
   if(!state)return;
   activeImportCheck=null;lastOcrSupplier='';ocrFirmHint={};ocrGeneration++;setMode('invoice',null);$('#invoice-form').reset();$('#invoice-form .form-error').textContent='';selectedPhoto=null;selectedPhotos=[];pdfOcrPhotos.clear();pdfTextLayers.clear();delete $('#invoice-form').dataset.batchJob;
+  photoLoading=false;$('#add-photo').disabled=false;$('#read-photo').disabled=false;$('#invoice-form button.primary').disabled=false;
   $('#expected-item-count').required=true;
   [...$('#invoice-form').elements].forEach(e=>{delete e.dataset.userEdited;e.title='';});
-  renderSelectedPhotos();$('#ocr-text').hidden=true;$('#copy-ocr').hidden=true;$('#ocr-review').hidden=true;$('#ocr-status').textContent='PDF veya fotoğraf isteğe bağlıdır. Okunan yazılar otomatik kaydedilmez.';
+  renderSelectedPhotos();$('#ocr-text').value='';$('#ocr-text').hidden=true;$('#copy-ocr').hidden=true;$('#ocr-review').textContent='';$('#ocr-review').hidden=true;$('#ocr-status').textContent='PDF veya fotoğraf isteğe bağlıdır. Okunan yazılar otomatik kaydedilmez.';
   $('#item-rows').innerHTML='';renderImportCheck();$('#due-preview').value='';
   $('#firm-select').innerHTML=state.firms.filter(f=>!f.archived||f.id===existingFirmId).map(f=>`<option value="${f.id}">${esc(f.name)}</option>`).join('');
   $('#layout-firm').innerHTML='<option value="">Otomatik firma tanıma</option>'+state.firms.filter(f=>f.ocr_amount_order&&(!f.archived||f.id===existingFirmId)).map(f=>`<option value="${f.id}">${esc(f.name)}</option>`).join('');
   $('#layout-firm').closest('label').hidden=$('#layout-firm').options.length===1;
   if(existingFirmId&&state.firms.some(f=>f.id===existingFirmId&&f.ocr_amount_order))$('#layout-firm').value=String(existingFirmId);
   $('#invoice-form [name=issued]').value=state.today;$('#invoice-dialog').showModal();
-  if(!existingFirmId){applyDefaultDue();restoreFormDraft($('#invoice-form'));}
+  if(!existingFirmId)applyDefaultDue();
 }
+$('#invoice-dialog').addEventListener('close',event=>{
+  if(event.currentTarget.open)return;
+  ocrGeneration++;
+  selectedPhoto=null;selectedPhotos=[];pdfOcrPhotos.clear();pdfTextLayers.clear();
+  renderSelectedPhotos();
+});
 $('#new-invoice').onclick=()=>openInvoiceForm();
 function applyDefaultDue(){
   const form=$('#invoice-form'),firm=state.firms.find(f=>f.id===Number(form.elements.firm_id.value));
@@ -1157,7 +1164,6 @@ function renderSelectedPhotos(){
 }
 function photoSelectionChanged(){
   ocrFirmHint={};
-  ocrGeneration++;
   $('.confirm input').checked=false;
   $('#ocr-text').hidden=true;$('#copy-ocr').hidden=true;$('#ocr-review').hidden=true;
   renderSelectedPhotos();
@@ -1187,10 +1193,12 @@ $('#photo').onchange=async e=>{
       if(isPdfFile(file)){
         $('#ocr-status').textContent=`${file.name} PDF sayfaları hazırlanıyor…`;
         const rendered=await pdfPageImages(file,6-selectedPhotos.length-added.length),pages=rendered.photos;
+        if(generation!==ocrGeneration||!$('#invoice-dialog').open)return;
         added.push(...pages);pages.forEach((page,index)=>{addedPdfPages.add(page);pdfTextLayers.set(page,rendered.layers[index]);});pdfPages+=pages.length;
       }else{
         if(selectedPhotos.length+added.length>=6)throw new Error('Toplam en fazla 6 sayfa ekleyebilirsiniz.');
         added.push(await fileDataUrl(file));
+        if(generation!==ocrGeneration||!$('#invoice-dialog').open)return;
       }
     }
     if(generation!==ocrGeneration||!$('#invoice-dialog').open)return;
@@ -1203,8 +1211,8 @@ $('#photo').onchange=async e=>{
     photoSelectionChanged();
     if(pdfPages)$('#ocr-status').textContent+=` PDF içinden ${pdfPages} sayfa hazırlandı.`;
     if(duplicate)$('#ocr-status').textContent+=' Aynı sayfa tekrar eklenmedi.';
-  }catch(error){$('#ocr-status').textContent=(error?.message||'Dosya yüklenemedi.')+' Mevcut sayfalarınız korundu.';}
-  finally{photoLoading=false;$('#add-photo').disabled=false;$('#read-photo').disabled=false;}
+  }catch(error){if(generation===ocrGeneration&&$('#invoice-dialog').open)$('#ocr-status').textContent=(error?.message||'Dosya yüklenemedi.')+' Mevcut sayfalarınız korundu.';}
+  finally{if(generation===ocrGeneration){photoLoading=false;$('#add-photo').disabled=false;$('#read-photo').disabled=false;}}
 };
 
 let ocrGeneration=0;
@@ -1223,7 +1231,7 @@ $('#read-photo').onclick=async()=>{
     const ocrPhotos=await prepareOcrPhotos(originalPhotos,true);
     if(generation!==ocrGeneration||selectedPhoto!==requestedPhoto||!$('#invoice-dialog').open)return;
     const textLayers=originalPhotos.map(photo=>pdfTextLayers.get(photo)).filter(Boolean);
-    const result=await api('ocr',{photos:ocrPhotos,pdf_text_layers:textLayers,layout_firm_id:$('#layout-firm').value});
+    const result=await api('ocr',{photos:ocrPhotos,pdf_text_layers:textLayers,source_page_count:originalPhotos.length,layout_firm_id:$('#layout-firm').value});
     if(generation!==ocrGeneration||selectedPhoto!==requestedPhoto||!$('#invoice-dialog').open)return;
     const draft=result.draft;
     if(!draft.items.length&&!draft.number&&!draft.ettn&&!draft.issued&&!draft.total&&!draft.supplier&&!draft.supplier_tax_numbers?.length){
@@ -1271,9 +1279,9 @@ $('#read-photo').onclick=async()=>{
     renderImportCheck();$('.confirm input').checked=false;
     $('#ocr-review').hidden=false;
     $('#ocr-review').textContent=(draft.supplier?'Okunan firma: '+draft.supplier+'\n':'')+draft.warnings.join('\n');
-    $('#ocr-status').textContent=`Türkçe okuma motoru çalıştı. ${draft.items.length} ürün satırı ve okunabilen fatura alanları dolduruldu. Henüz kaydedilmedi. Tüm sayfaların eksiksiz okunduğunu kontrol edin; boş alanları tamamlayın. Birim fiyatlar satır tutarı + KDV üzerinden hesaplandı.`;scheduleFormDraft(form);
-  }catch(e){$('#ocr-status').textContent=e.message;}
-  finally{$('#read-photo').disabled=false;$('#add-photo').disabled=false;form.querySelector('button.primary').disabled=false;}
+    $('#ocr-status').textContent=`${result.language==='PDF'?'PDF metni doğrulandı.':'Türkçe okuma motoru çalıştı.'} ${draft.items.length} ürün satırı ve okunabilen fatura alanları dolduruldu. Henüz kaydedilmedi. Tüm sayfaların eksiksiz okunduğunu kontrol edin; boş alanları tamamlayın. Birim fiyatlar satır tutarı + KDV üzerinden hesaplandı.`;scheduleFormDraft(form);
+  }catch(e){if(generation===ocrGeneration&&$('#invoice-dialog').open)$('#ocr-status').textContent=e.message;}
+  finally{if(generation===ocrGeneration){$('#read-photo').disabled=false;$('#add-photo').disabled=false;form.querySelector('button.primary').disabled=false;}}
 };
 
 document.addEventListener('click',async e=>{
@@ -1427,10 +1435,11 @@ document.addEventListener('click',async e=>{
     savedItems.forEach(t=>{$('#add-item').click();const row=$('#item-rows').lastElementChild;row.querySelector('.product').value=t.product;row.querySelector('.unit').value=t.unit;row.querySelector('.price').value=t.unit_price||String(t.price/100);row.querySelector('.row-number').value=t.row_number||'';row.querySelector('.line-total').value=metadata.line_total_kind==='net'?(t.source_net||t.line_total):(t.line_total||'');row.querySelector('.vat').value=t.source_vat||'0';row.querySelector('.quantity').value=t.quantity||'';row.querySelector('.gift-quantity').value=Number(t.gift_quantity)?t.gift_quantity:'';row.querySelector('.code').value=t.code||'';setGiftOnly(row,Boolean(t.gift_only));if(t.source_net!==''&&t.source_vat!==''){row.dataset.sourceNet=t.source_net;row.dataset.sourceVat=t.source_vat;const evidence=document.createElement('small');evidence.className='item-evidence';evidence.textContent='Faturada yazan: '+t.source_net+' TL · KDV: '+t.source_vat+' TL';row.append(evidence);}});
     renderImportCheck();
     if(i.has_photo){
+      const generation=ocrGeneration;
       photoLoading=true;form.querySelector('button.primary').disabled=true;
-      try{const r=await api('photo/'+i.id);selectedPhotos=r.photos||[r.photo];pdfOcrPhotos.clear();pdfTextLayers.clear();renderSelectedPhotos();}
-      catch(error){form.closest('dialog').close();toast('Fatura sayfaları yüklenemedi. Kaydı yeniden açın.');}
-      finally{photoLoading=false;form.querySelector('button.primary').disabled=false;}
+      try{const r=await api('photo/'+i.id);if(generation!==ocrGeneration||!form.closest('dialog').open)return;selectedPhotos=r.photos||[r.photo];pdfOcrPhotos.clear();pdfTextLayers.clear();renderSelectedPhotos();}
+      catch(error){if(generation===ocrGeneration&&form.closest('dialog').open){form.closest('dialog').close();toast('Fatura sayfaları yüklenemedi. Kaydı yeniden açın.');}return;}
+      finally{if(generation===ocrGeneration){photoLoading=false;form.querySelector('button.primary').disabled=false;}}
     }
     restoreFormDraft(form);
   }

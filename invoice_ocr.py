@@ -850,6 +850,7 @@ def parse_tsv_table(tsv_text, amount_order=None):
     detected = set()
     warnings = []
     labeled_pages = 0
+    table_pages = 0
     for page_words in pages.values():
         labeled = None if amount_order else (
             _seller_and_manufacturer_table(page_words) or _product_code_table(page_words)
@@ -863,6 +864,7 @@ def parse_tsv_table(tsv_text, amount_order=None):
             generic_rows, generic_numbers, generic_warnings = _page_items_without_codes(page_words, amount_order)
             if len(generic_rows) > len(rows):
                 rows, numbers, page_warnings = generic_rows, generic_numbers, generic_warnings
+        table_pages += bool(numbers)
         detected.update(numbers)
         warnings.extend(page_warnings)
         for item, confidence in rows:
@@ -920,6 +922,7 @@ def parse_tsv_table(tsv_text, amount_order=None):
         warnings.append("TSV içinde ürün sıra numarası ve ürün kodu birlikte bulunamadı.")
     return {
         "labeled_pages": labeled_pages,
+        "table_pages": table_pages,
         "items": items,
         "expected_rows": expected_rows,
         "detected_rows": sorted(detected),

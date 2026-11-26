@@ -1,6 +1,6 @@
 import unittest
 
-from app import apply_supplier_layout
+from app import apply_supplier_layout, tsv_reading, verified_pdf_draft
 from invoice_parser import merge_readings
 from invoice_ocr import parse_tsv_table, _clean_product
 
@@ -93,6 +93,14 @@ class InvoiceTsvTests(unittest.TestCase):
         row = result['items'][0]
         self.assertEqual((row['code'], row['product'], row['source_price']),
                          ('ERP STK-000123', 'Meyve Suyu X 12 Ad', '20'))
+        positioned = tsv_reading(table.text())
+        header = dict(number='TEST123', issued='2026-11-26', total='44.00',
+                      items=[dict(row_number=1, code='', product='Eksik ad')])
+        draft = verified_pdf_draft([positioned, header])
+        self.assertEqual(draft['items'][0]['product'], 'Meyve Suyu X 12 Ad')
+        self.assertFalse(draft['coverage']['errors'])
+        self.assertIsNone(verified_pdf_draft([positioned, dict(header, total='45.00')]))
+        self.assertIsNone(verified_pdf_draft([dict(positioned, table_pages=2), header]))
 
     def test_reads_seller_code_and_wrapped_description_in_e_invoice(self):
         table = TsvBuilder()
